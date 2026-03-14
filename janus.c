@@ -1341,9 +1341,9 @@ static void save_model(DualModel *dm, const char *path) {
     fwrite(dm->A.chuck_v, sizeof(float), dm->A.n_params, f);
     fwrite(dm->B.chuck_m, sizeof(float), dm->B.n_params, f);
     fwrite(dm->B.chuck_v, sizeof(float), dm->B.n_params, f);
+    long file_size = ftell(f);
     fclose(f);
-    printf("[janus] saved to %s (%.2fMB)\n", path,
-           (float)ftell(f) / 1e6f);
+    printf("[janus] saved to %s (%.2fMB)\n", path, (float)file_size / 1e6f);
 }
 
 static int load_model(DualModel *dm, const char *path) {
