@@ -533,9 +533,9 @@ def train_on_text(text, total_steps=2000, lr=0.001):
     global embedA, embedB
 
     ids = tokenize_text(text)
-    if len(ids) < STEPS + 1:
+    if len(ids) < STEPS + 2:
         print('Error: text too short after tokenization '
-              f'({len(ids)} tokens, need at least {STEPS + 1})')
+              f'({len(ids)} tokens, need at least {STEPS + 2})')
         return
 
     print(f'Tokenized: {len(ids)} tokens')
@@ -618,6 +618,7 @@ def train_on_text(text, total_steps=2000, lr=0.001):
 
         # Train matrix B on even steps
         if step % 2 == 0:
+            # Matrix B: simple next-word, needs context + target (2 tokens)
             off2 = random.randint(0, len(ids) - 2)
             target2 = ids[off2 + 1]
             ctx2 = [0.0] * DIM
