@@ -1,0 +1,883 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>NanoJanus</title>
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=EB+Garamond:ital,wght@0,400;0,500;0,700;1,400&display=swap');
+
+  :root {
+    --bg: #0a0a0f;
+    --fg: #e8e8e0;
+    --dim: #666;
+    --ghost: #444;
+    --accent-fwd: #4a9eff;
+    --accent-bwd: #ff6b4a;
+    --accent-origin: #ffd700;
+    --serif: 'EB Garamond', Georgia, serif;
+  }
+
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+
+  body {
+    background: var(--bg);
+    color: var(--fg);
+    font-family: var(--serif);
+    height: 100vh;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+  }
+
+  #logo {
+    position: fixed;
+    top: 20px;
+    left: 50%;
+    transform: translateX(-50%);
+    font-size: 11px;
+    letter-spacing: 10px;
+    text-transform: uppercase;
+    color: #555;
+    user-select: none;
+    font-weight: 500;
+  }
+
+  #janus-faces {
+    position: fixed;
+    top: 14px;
+    right: 28px;
+    font-size: 20px;
+    color: #555;
+    user-select: none;
+    opacity: 0.5;
+  }
+
+  #metrics {
+    position: fixed;
+    top: 50px;
+    left: 50%;
+    transform: translateX(-50%);
+    font-size: 10px;
+    color: var(--ghost);
+    letter-spacing: 1px;
+    text-align: center;
+    font-family: monospace;
+  }
+
+  #arena {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
+    align-items: center;
+    padding: 80px 40px 120px;
+    overflow-y: auto;
+  }
+
+  #column {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 6px;
+    width: 100%;
+    max-width: 700px;
+  }
+
+  .word-line {
+    font-size: 20px;
+    font-weight: 400;
+    letter-spacing: 1px;
+    opacity: 0;
+    transform: translateY(12px);
+    animation: word-arrive 0.8s ease forwards;
+    text-align: center;
+    padding: 2px 8px;
+    border-radius: 4px;
+  }
+
+  .word-line.backward {
+    color: var(--accent-bwd);
+    animation-name: word-arrive-up;
+  }
+
+  .word-line.forward {
+    color: var(--accent-fwd);
+  }
+
+  .word-line.origin {
+    color: var(--accent-origin);
+    font-weight: 700;
+    font-size: 24px;
+    border: 1px solid var(--accent-origin);
+    padding: 4px 16px;
+  }
+
+  .word-line.wormhole {
+    font-style: italic;
+    text-decoration: underline;
+    text-decoration-style: dotted;
+  }
+
+  .step-num {
+    font-size: 9px;
+    color: var(--dim);
+    margin-right: 8px;
+    font-family: monospace;
+  }
+
+  .step-debt {
+    font-size: 9px;
+    color: var(--ghost);
+    margin-left: 8px;
+    font-family: monospace;
+  }
+
+  @keyframes word-arrive {
+    to { opacity: 1; transform: translateY(0); }
+  }
+
+  @keyframes word-arrive-up {
+    from { opacity: 0; transform: translateY(-12px); }
+    to { opacity: 1; transform: translateY(0); }
+  }
+
+  #separator {
+    width: 60%;
+    height: 1px;
+    background: linear-gradient(90deg, transparent, var(--accent-origin), transparent);
+    margin: 12px 0;
+    opacity: 0;
+    animation: fade-in 1s ease forwards;
+  }
+
+  @keyframes fade-in { to { opacity: 1; } }
+
+  /* input */
+  #input-bar {
+    position: fixed;
+    bottom: 0;
+    left: 0;
+    right: 0;
+    padding: 16px 20px;
+    display: flex;
+    gap: 12px;
+    justify-content: center;
+    background: linear-gradient(transparent, var(--bg) 30%);
+  }
+
+  #input-bar input {
+    width: 500px;
+    max-width: 70vw;
+    padding: 12px 20px;
+    font-size: 16px;
+    font-family: var(--serif);
+    background: #161620;
+    border: 1px solid #333;
+    border-radius: 8px;
+    color: var(--fg);
+    outline: none;
+  }
+
+  #input-bar input:focus { border-color: var(--accent-fwd); }
+
+  #input-bar button {
+    padding: 12px 24px;
+    font-family: var(--serif);
+    font-size: 14px;
+    background: #1a1a2e;
+    color: var(--fg);
+    border: 1px solid #333;
+    border-radius: 8px;
+    cursor: pointer;
+    letter-spacing: 2px;
+    text-transform: uppercase;
+  }
+
+  #input-bar button:hover { border-color: var(--accent-fwd); }
+
+  #train-status {
+    position: fixed;
+    bottom: 70px;
+    left: 50%;
+    transform: translateX(-50%);
+    font-size: 11px;
+    color: var(--ghost);
+    font-family: monospace;
+  }
+</style>
+</head>
+<body>
+
+<div id="logo">N A N O J A N U S</div>
+<div id="janus-faces">◄ ►</div>
+<div id="metrics"></div>
+
+<div id="arena">
+  <div id="column"></div>
+</div>
+
+<div id="train-status"></div>
+<div id="input-bar">
+  <input id="prompt" type="text" placeholder="speak to janus..." autofocus />
+  <button id="send">RESONATE</button>
+  <button id="train-btn">TRAIN</button>
+</div>
+
+<script>
+// ═══════════════════════════════════════════════════════════════
+// NANOJANUS — Bi-directional associative reasoning in the browser
+//
+// Architecture mirrors Penelope but with Janus characteristics:
+//   - Word-level output (like Penelope)
+//   - BPE-like internal embeddings
+//   - Dual weight matrices blended by calendar drift
+//   - 12 bi-directional steps (forward + backward)
+//   - Janus self-resonance attention
+//   - Dario equation for scoring
+//   - Prophecy, Destiny, Prophecy Debt, Wormhole
+//   - MetaJanus birth date mathematical "self"
+//   - Kuramoto chambers (6 coupled oscillators)
+//   - Chuck optimizer for training
+// ═══════════════════════════════════════════════════════════════
+
+const STEPS = 12;
+const DIM = 64;
+const HDIM = 128;
+
+// ═══ 1984 WORD VOCABULARY (from Penelope) ═══
+const WORDS = [
+"the","of","and","to","in","a","is","that","for","it","was","on","are","be","with","as",
+"at","by","this","from","or","an","but","not","you","all","can","we","her","one","do","has",
+"have","will","they","my","he","she","no","so","if","out","up","what","about","their","them",
+"would","into","been","when","who","more","some","time","very","than","could","other","its",
+"new","just","these","also","now","any","only","come","made","may","way","then","after","over",
+"such","how","think","our","much","where","get","like","most","well","know","take","back","still",
+"here","good","did","see","go","through","own","too","long","work","make","find","down","first",
+"day","between","even","being","same","another","last","never","great","old","because","before",
+"life","right","off","many","world","us","must","should","while","home","under","water","room",
+"night","around","live","something","nothing","every","place","say","once","without","again",
+"always","left","hand","turn","look","run","away","end","year","small","big","part","people",
+"man","woman","child","house","point","door","eye","head","face","side","light","dark","open",
+"close","name","word","thing","let","keep","give","few","mind","help","tell","might","city",
+"follow","begin","stand","move","hold","try","seem","walk","show","feel","high","low","put",
+"came","together","body","enough","story","boy","girl","power","read","write","play","air",
+"land","far","near","line","state","set","call","start","white","black","red","blue","ground",
+"change","went","sit","bring","carry","watch","real","among","second","later","young","need",
+"want","until","eat","full","four","sure","order","love","heart","true","voice","fall","reason",
+"cold","fire","hot","hard","soft","stone","rain","wind","tree","river","sea","mountain","road",
+"field","forest","garden","sky","sun","moon","star","earth","morning","evening","spring","summer",
+"winter","north","south","east","west","floor","wall","window","table","bed","chair","paper",
+"money","music","song","color","green","gold","iron","blood","bone","skin","hair","animal",
+"bird","fish","horse","dog","cat","flower","grass","leaf","snow","ice","sand","dust","smoke",
+"cloud","shadow","mirror","glass","silver","silk","cotton","wool","bread","milk","wine","oil",
+"sugar","salt","fruit","seed","root","branch","wave","flame","steel","copper","diamond",
+"pearl","crystal","thunder","lightning","fog","dew","storm","ocean","lake","island","valley",
+"canyon","plateau","tundra","desert","oasis","dune","glacier","volcano","peninsula",
+"kingdom","empire","castle","tower","bridge","gate","harbor","market","temple","church",
+"prison","library","school","hospital","garden","palace","fortress","monument","fountain",
+"labyrinth","death","life","birth","dream","sleep","wake","hunger","thirst","fear","rage",
+"love","hate","joy","sorrow","hope","despair","peace","war","freedom","justice","mercy","truth",
+"beauty","silence","chaos","order","pattern","rhythm","frequency","resonance","harmony",
+"dissonance","entropy","emergence","threshold","memory","future","past","present","eternal",
+"infinite","void","abyss","horizon","boundary","surface","depth","weight","measure","scale",
+"balance","gravity","force","pressure","tension","energy","matter","spirit","soul","ghost",
+"angel","demon","god","devil","heaven","hell","fate","destiny","prophecy","oracle",
+"sacrifice","ritual","ceremony","prayer","blessing","curse","wound","healing","poison",
+"medicine","fever","pulse","breath","whisper","echo","silence","scream","cry","laugh",
+"dance","mask","crown","throne","sword","shield","arrow","bow","spear","hammer","chain",
+"key","lock","ring","circle","spiral","cross","triangle","square","sphere","cube","pyramid",
+"tunnel","path","bridge","door","window","mirror","lens","prism","shadow","light",
+"darkness","dawn","dusk","midnight","noon","hour","moment","century","millennium",
+"beginning","ending","origin","return","journey","quest","trial","victory","defeat",
+"surrender","resistance","rebellion","revolution","creation","destruction","transformation",
+"evolution","dissolution","resurrection","revelation","apocalypse","genesis","exodus",
+"wilderness","promised","covenant","testament","judgment","salvation","damnation","purgatory",
+"limbo","nirvana","karma","dharma","mantra","sutra","koan","zen","tao","yin","yang",
+"element","alchemy","philosopher","stone","elixir","potion","spell","enchantment","illusion",
+"reality","simulation","matrix","code","signal","noise","data","algorithm","equation",
+"theorem","axiom","paradox","infinity","zero","one","two","three","seven","twelve",
+"hundred","thousand","million","first","last","next","final","absolute","relative",
+"abstract","concrete","solid","liquid","gas","plasma","atom","molecule","cell","organ",
+"organism","species","genus","kingdom","universe","galaxy","constellation","nebula",
+"supernova","singularity","dimension","vector","tensor","field","wave","particle","quantum",
+"string","membrane","vacuum","void","ether","dark","antimatter","entropy","syntropy",
+"emergence","complexity","simplicity","elegance","symmetry","asymmetry","fractal","chaos",
+"strange","attractor","butterfly","tornado","hurricane","earthquake","tsunami","avalanche",
+"erosion","metamorphosis","chrysalis","cocoon","larva","pupa","caterpillar","moth",
+"spider","web","nest","hive","swarm","flock","pack","herd","tribe","nation","civilization",
+"culture","language","alphabet","symbol","sign","meaning","sense","perception","consciousness",
+"awareness","attention","focus","intention","will","desire","need","drive","instinct",
+"intuition","reason","logic","imagination","creativity","inspiration","revelation",
+"epiphany","insight","wisdom","knowledge","information","understanding","comprehension",
+"recognition","memory","forgetting","remembering","nostalgia","longing","yearning",
+"wandering","searching","finding","losing","keeping","releasing","holding","letting",
+"falling","rising","floating","sinking","drowning","breathing","living","dying",
+"born","unborn","reborn","undead","immortal","mortal","fragile","resilient","broken",
+"whole","empty","full","open","closed","hidden","revealed","sacred","profane","pure",
+"corrupt","innocent","guilty","free","bound","wild","tame","raw","refined","crude",
+"elegant","simple","complex","deep","shallow","wide","narrow","long","short","tall",
+"thin","thick","heavy","light","fast","slow","loud","quiet","sharp","dull","smooth","rough",
+"wet","dry","warm","cool","sweet","bitter","sour","acid","alkaline","neutral","positive",
+"negative","active","passive","dynamic","static","stable","unstable","volatile",
+"magnetic","electric","nuclear","thermal","acoustic","optical","digital","analog",
+"binary","decimal","hexagonal","circular","linear","exponential","logarithmic",
+"harmonic","melodic","rhythmic","sonic","subsonic","ultrasonic","infrared","ultraviolet",
+"visible","invisible","transparent","opaque","translucent","reflective","absorbing",
+"radiating","oscillating","vibrating","pulsating","resonating","amplifying","attenuating",
+"filtering","modulating","encoding","decoding","transmitting","receiving",
+"connecting","disconnecting","integrating","differentiating","converging","diverging",
+"ascending","descending","expanding","contracting","inflating","deflating",
+"accelerating","decelerating","rotating","orbiting","spiraling","undulating",
+"crystallizing","dissolving","precipitating","evaporating","condensing","sublimating",
+"oxidizing","reducing","catalyzing","inhibiting","stimulating","suppressing",
+"generating","consuming","storing","releasing","absorbing","reflecting","refracting",
+"diffracting","interfering","reinforcing","canceling","superposing","entangling",
+"collapsing","observing","measuring","calculating","predicting","determining",
+"choosing","deciding","acting","reacting","responding","adapting","evolving","mutating",
+"selecting","breeding","cultivating","harvesting","planting","growing","blooming",
+"wilting","decaying","decomposing","fermenting","distilling","purifying","contaminating",
+"polluting","cleaning","restoring","preserving","destroying","rebuilding","renovating",
+"designing","engineering","manufacturing","assembling","disassembling","recycling",
+"composting","burning","freezing","melting","boiling","steaming","dripping","flowing",
+"flooding","overflowing","draining","filtering","sifting","sorting","organizing",
+"arranging","distributing","collecting","gathering","scattering","dispersing",
+"concentrating","diluting","mixing","separating","combining","splitting","merging",
+"joining","welding","soldering","gluing","tying","binding","wrapping","unwrapping",
+"folding","unfolding","stretching","compressing","bending","twisting","turning",
+"spinning","rolling","sliding","gliding","skating","skiing","surfing","diving",
+"swimming","sailing","rowing","paddling","steering","navigating","exploring",
+"discovering","inventing","creating","imagining","dreaming","hoping","wishing",
+"praying","meditating","contemplating","reflecting","pondering","wondering",
+"questioning","answering","solving","resolving","concluding","summarizing",
+"abstract","painting","sculpture","architecture","poetry","prose","drama",
+"comedy","tragedy","opera","symphony","concerto","sonata","fugue","canon",
+"prelude","overture","interlude","finale","coda","verse","chorus","refrain",
+"melody","harmony","counterpoint","dissonance","resolution","cadence","tempo",
+"andante","allegro","adagio","fortissimo","pianissimo","crescendo","diminuendo",
+"staccato","legato","vibrato","tremolo","arpeggio","glissando","portamento",
+"photograph","letter","book","page","chapter","verse","sentence","paragraph",
+"word","alphabet","number","symbol","equation","formula","theorem","proof",
+"hypothesis","theory","law","principle","axiom","postulate","lemma","corollary",
+"conjecture","paradox","dilemma","enigma","mystery","puzzle","riddle","cipher",
+"code","signal","message","communication","language","speech","voice","whisper",
+"murmur","shout","scream","cry","laugh","sigh","groan","moan","hum","buzz",
+"hiss","crack","snap","pop","bang","boom","crash","splash","drip","flow",
+"pour","spray","mist","fog","cloud","rain","snow","hail","sleet","frost",
+"ice","thaw","melt","steam","vapor","gas","smoke","ash","ember","spark",
+"flame","fire","blaze","inferno","furnace","forge","anvil","hammer","tongs",
+"bellows","chimney","hearth","altar","candle","torch","lantern","lamp","beacon",
+"lighthouse","compass","telescope","microscope","kaleidoscope","periscope"
+];
+
+const NWORDS = WORDS.length;
+
+// ═══ CALENDAR DRIFT (exact from ariannamethod.c) ═══
+const AM_ANNUAL_DRIFT = 11.25;
+const AM_GREGORIAN_YEAR = 365.25;
+const AM_METONIC_YEARS = 19;
+const AM_METONIC_LEAPS = 7;
+const AM_MAX_UNCORRECTED = 33.0;
+const METONIC_LEAP_YEARS = [3, 6, 8, 11, 14, 17, 19];
+
+// Epoch: 1 Tishrei 5785 = October 3, 2024
+const EPOCH = new Date(2024, 9, 3, 12, 0, 0);
+
+function calendarDaysSinceEpoch() {
+  return Math.floor((Date.now() - EPOCH.getTime()) / 86400000);
+}
+
+function calendarCumulativeDrift(days) {
+  const years = days / AM_GREGORIAN_YEAR;
+  let baseDrift = years * AM_ANNUAL_DRIFT;
+  const fullCycles = Math.floor(years / AM_METONIC_YEARS);
+  let corrections = fullCycles * AM_METONIC_LEAPS * 30;
+  const partial = years % AM_METONIC_YEARS;
+  const yic = Math.floor(partial) + 1;
+  for (let i = 0; i < AM_METONIC_LEAPS; i++)
+    if (METONIC_LEAP_YEARS[i] <= yic) corrections += 30;
+  return baseDrift - corrections;
+}
+
+function calendarDissonance(days) {
+  const drift = calendarCumulativeDrift(days);
+  const raw = Math.abs(drift % AM_MAX_UNCORRECTED) / AM_MAX_UNCORRECTED;
+  return Math.max(0, Math.min(1, raw));
+}
+
+// ═══ METAJANUS — birth snapshot ═══
+const META = {
+  birthDays: calendarDaysSinceEpoch(),
+  birthDrift: calendarCumulativeDrift(calendarDaysSinceEpoch()),
+  birthDissonance: calendarDissonance(calendarDaysSinceEpoch()),
+  birthTime: Date.now(),
+  prophecyAccuracy: 0.5,
+  totalPredictions: 0
+};
+
+function personalDissonance() {
+  const nowDrift = calendarCumulativeDrift(calendarDaysSinceEpoch());
+  return Math.max(0, Math.min(1, Math.abs(nowDrift - META.birthDrift) / AM_MAX_UNCORRECTED));
+}
+
+// ═══ AML PHYSICS ═══
+let prophecyDebt = 0;
+let destinyBias = 0.1;
+let wormhole = 0.02;
+let resonanceField = 0.5;
+let trauma = 0;
+
+function computeProphecyDebt(scores, chosenIdx) {
+  if (scores.length === 0) return 0;
+  const max = Math.max(...scores.map(s => s.score));
+  const chosen = scores[chosenIdx]?.score || 0;
+  const diff = max - chosen;
+  return diff > 0 ? diff / (diff + 1) : 0;
+}
+
+// ═══ KURAMOTO CHAMBERS ═══
+const CH = { FEAR: 0, LOVE: 1, RAGE: 2, VOID: 3, FLOW: 4, COMPLEX: 5, N: 6 };
+const chambers = new Float32Array(CH.N);
+const chDecay = [0.95, 0.95, 0.93, 0.96, 0.94, 0.97];
+
+function updateChambers(stepIdx) {
+  const depth = stepIdx / STEPS;
+  if (depth < 0.33) chambers[CH.FLOW] += 0.05;
+  else if (depth < 0.66) chambers[CH.FEAR] += 0.04;
+  else chambers[CH.VOID] += 0.05;
+  if (depth > 0.75) chambers[CH.COMPLEX] += 0.03;
+  if (trauma > 0.3) chambers[CH.RAGE] += 0.04;
+  const K = 0.02, old = new Float32Array(chambers);
+  for (let i = 0; i < CH.N; i++) {
+    for (let j = 0; j < CH.N; j++)
+      if (i !== j) chambers[i] += K * Math.sin(old[j] - old[i]);
+    chambers[i] = Math.max(0, Math.min(1, chambers[i] * chDecay[i]));
+  }
+}
+
+// ═══ DUAL WEIGHT MATRICES ═══
+// Matrix A and Matrix B — word association weights
+// Blended by calendar drift + prophecy debt
+const embedA = new Float32Array(NWORDS * DIM);
+const embedB = new Float32Array(NWORDS * DIM);
+// Step weights: RRPRAM-style Wr per step
+const stepWrA = [];
+const stepWrB = [];
+const stepRmsA = [];
+const stepRmsB = [];
+const stepGateA = [];  // SwiGLU
+const stepUpA = [];
+const stepDownA = [];
+const stepGateB = [];
+const stepUpB = [];
+const stepDownB = [];
+
+// Initialize
+function initWeights() {
+  const scale = Math.sqrt(2 / DIM) * 0.02;
+  for (let i = 0; i < NWORDS * DIM; i++) {
+    embedA[i] = (Math.random() - 0.5) * scale;
+    embedB[i] = (Math.random() - 0.5) * scale;
+  }
+  for (let s = 0; s < STEPS; s++) {
+    stepWrA.push(new Float32Array(DIM * DIM));
+    stepWrB.push(new Float32Array(DIM * DIM));
+    stepRmsA.push(new Float32Array(DIM).fill(1));
+    stepRmsB.push(new Float32Array(DIM).fill(1));
+    stepGateA.push(new Float32Array(DIM * HDIM));
+    stepUpA.push(new Float32Array(DIM * HDIM));
+    stepDownA.push(new Float32Array(HDIM * DIM));
+    stepGateB.push(new Float32Array(DIM * HDIM));
+    stepUpB.push(new Float32Array(DIM * HDIM));
+    stepDownB.push(new Float32Array(HDIM * DIM));
+    for (let i = 0; i < DIM * DIM; i++) {
+      stepWrA[s][i] = (Math.random() - 0.5) * scale;
+      stepWrB[s][i] = (Math.random() - 0.5) * scale;
+    }
+    for (let i = 0; i < DIM * HDIM; i++) {
+      stepGateA[s][i] = (Math.random() - 0.5) * scale;
+      stepUpA[s][i] = (Math.random() - 0.5) * scale;
+      stepGateB[s][i] = (Math.random() - 0.5) * scale;
+      stepUpB[s][i] = (Math.random() - 0.5) * scale;
+    }
+    for (let i = 0; i < HDIM * DIM; i++) {
+      stepDownA[s][i] = (Math.random() - 0.5) * scale;
+      stepDownB[s][i] = (Math.random() - 0.5) * scale;
+    }
+  }
+}
+initWeights();
+
+// Blend weights by calendar state
+function getBlendAlpha() {
+  const cd = calendarDissonance(calendarDaysSinceEpoch());
+  const pd = personalDissonance();
+  return Math.max(0, Math.min(1, 0.5 + 0.3*(cd-0.5) - 0.2*prophecyDebt + 0.1*pd));
+}
+
+function blendedEmbed(wordIdx) {
+  const a = getBlendAlpha(), b = 1 - a;
+  const out = new Float32Array(DIM);
+  for (let i = 0; i < DIM; i++)
+    out[i] = a * embedA[wordIdx*DIM+i] + b * embedB[wordIdx*DIM+i];
+  return out;
+}
+
+// ═══ CO-OCCURRENCE + BIGRAMS (Dario equation) ═══
+const cooc = new Map();
+const bigrams = new Map();
+
+function updateCooc(w1, w2) {
+  const key = Math.min(w1,w2) + ',' + Math.max(w1,w2);
+  cooc.set(key, (cooc.get(key)||0) + 1);
+}
+
+function getCooc(w1, w2) {
+  return cooc.get(Math.min(w1,w2) + ',' + Math.max(w1,w2)) || 0;
+}
+
+function updateBigram(prev, next) {
+  const key = prev + ',' + next;
+  bigrams.set(key, (bigrams.get(key)||0) + 1);
+}
+
+function getBigram(prev, next) {
+  return bigrams.get(prev + ',' + next) || 0;
+}
+
+// ═══ TOKENIZER (word-level with BPE-like matching) ═══
+function tokenizeText(text) {
+  const words = text.toLowerCase().replace(/[^a-z\s]/g, '').split(/\s+/);
+  const ids = [];
+  for (const w of words) {
+    const idx = WORDS.indexOf(w);
+    if (idx >= 0) ids.push(idx);
+    else {
+      // Stem matching
+      for (let len = w.length - 1; len >= 3; len--) {
+        const stem = w.substring(0, len);
+        const si = WORDS.indexOf(stem);
+        if (si >= 0) { ids.push(si); break; }
+      }
+    }
+  }
+  return ids;
+}
+
+// ═══ DARIO EQUATION — word scoring ═══
+function silu(x) { return x > -20 ? x / (1 + Math.exp(-x)) : 0; }
+
+function darioScore(candidateIdx, context, prevWord, stepIdx, direction) {
+  const alpha_mod = 1 + 0.3*chambers[CH.LOVE] - 0.2*chambers[CH.RAGE] + 0.1*chambers[CH.FLOW];
+  const gamma_mod = 1 + 0.4*chambers[CH.VOID] + 0.2*chambers[CH.COMPLEX];
+
+  // B: bigram
+  let B = 0;
+  if (prevWord >= 0) B = Math.log(1 + getBigram(prevWord, candidateIdx)) * 4;
+
+  // H: Hebbian co-occurrence
+  let H = 0;
+  for (const c of context) H += Math.log(1 + getCooc(c, candidateIdx));
+  H = H / (context.length + 1);
+
+  // F: Prophecy fulfillment (scaled by debt)
+  const F = prophecyDebt * (1 + Math.random() * 0.5);
+
+  // A: Destiny attraction
+  const A = destinyBias * gamma_mod * 0.5;
+
+  // Direction modulation: backward steps are more conservative
+  const dirMod = direction === -1 ? 0.8 : 1.2;
+
+  // SwiGLU gating through resonance
+  const gate = 1 / (1 + Math.exp(-(resonanceField - 0.5) * 4));
+  const h_g = silu(gate * 2);
+  const f_g = silu(gate * 1.5);
+
+  // Calendar dissonance modulation
+  const calMod = 1 + 0.2 * calendarDissonance(calendarDaysSinceEpoch());
+
+  const tau = 0.7 + stepIdx * 0.06 + prophecyDebt * 0.3;
+  const score = (B + alpha_mod * 3 * H * h_g + 2 * F * f_g + A) * dirMod * calMod / tau;
+
+  return score + (Math.random() - 0.5) * 0.3 * (1 - stepIdx/STEPS);
+}
+
+// ═══ WORD SELECTION ═══
+function selectWord(context, prevWord, stepIdx, forbidden, direction) {
+  const scores = [];
+  for (let i = 0; i < NWORDS; i++) {
+    if (forbidden.has(i)) continue;
+    scores.push({ word: WORDS[i], idx: i,
+                  score: darioScore(i, context, prevWord, stepIdx, direction) });
+  }
+  scores.sort((a, b) => b.score - a.score);
+  const topK = Math.min(8, scores.length);
+  const top = scores.slice(0, topK);
+  let sum = 0;
+  for (const s of top) { s.score = Math.max(0, s.score); sum += s.score; }
+  if (sum < 1e-10) return top[0];
+  let r = Math.random() * sum, cum = 0;
+  for (const s of top) { cum += s.score; if (cum >= r) return s; }
+  return top[0];
+}
+
+// ═══ BI-DIRECTIONAL REASONING ═══
+function extractKey(text) {
+  const ids = tokenizeText(text);
+  if (ids.length === 0) return Math.floor(Math.random() * NWORDS);
+  // Find most "charged" word (highest total co-occurrence)
+  let best = ids[0], bestScore = 0;
+  for (const id of ids) {
+    let sc = 0;
+    for (const [k, v] of cooc) { const [a,b] = k.split(',').map(Number); if (a===id||b===id) sc += v; }
+    if (sc > bestScore) { bestScore = sc; best = id; }
+  }
+  return best;
+}
+
+async function runChain(userText) {
+  const column = document.getElementById('column');
+  column.innerHTML = '';
+
+  const context = tokenizeText(userText);
+  const seedIdx = extractKey(userText);
+  const seedWord = WORDS[seedIdx] || 'void';
+
+  // MetaJanus prophecy
+  const calD = calendarDissonance(calendarDaysSinceEpoch());
+  const predictedEntropy = 0.5 + 0.2*prophecyDebt + 0.1*calD + 0.15*personalDissonance();
+
+  // Determine forward/backward split
+  const nBackward = Math.max(1, Math.min(STEPS-1,
+    Math.floor(STEPS * (0.3 + 0.4*prophecyDebt + 0.1*calD))));
+  const nForward = STEPS - nBackward;
+
+  updateMetrics();
+
+  const backSteps = [];
+  const fwdSteps = [];
+  const forbidden = new Set();
+
+  // Forward steps (future)
+  let chain = [...context];
+  let prevWord = seedIdx;
+  for (let s = 0; s < nForward; s++) {
+    updateChambers(s);
+    // Wormhole check
+    let isWormhole = false;
+    if (prophecyDebt < 0.2 && wormhole > 0.1 && Math.random() < wormhole) {
+      isWormhole = true;
+      s += Math.floor(Math.random() * 2); // skip ahead
+    }
+    const sel = selectWord(chain, prevWord, s, forbidden, 1);
+    fwdSteps.push({ word: sel.word, idx: sel.idx, step: s, wormhole: isWormhole,
+                    debt: prophecyDebt, scores: [] });
+    chain.push(sel.idx);
+    if (prevWord >= 0) updateBigram(prevWord, sel.idx);
+    for (const c of context) updateCooc(c, sel.idx);
+    forbidden.add(sel.idx);
+    prophecyDebt = 0.9 * prophecyDebt + 0.1 * computeProphecyDebt([sel], 0);
+    prevWord = sel.idx;
+  }
+
+  // Backward steps (past — more exploratory)
+  chain = [...context];
+  prevWord = seedIdx;
+  for (let s = 0; s < nBackward; s++) {
+    updateChambers(nForward + s);
+    const sel = selectWord(chain, prevWord, nForward + s, forbidden, -1);
+    backSteps.push({ word: sel.word, idx: sel.idx, step: nForward + s, wormhole: false,
+                     debt: prophecyDebt });
+    chain.push(sel.idx);
+    forbidden.add(sel.idx);
+    prophecyDebt = 0.9 * prophecyDebt + 0.1 * computeProphecyDebt([sel], 0);
+    prevWord = sel.idx;
+  }
+
+  // Display: backward steps first (top), then origin, then forward (bottom)
+  // Backward steps appear from top
+  for (let i = backSteps.length - 1; i >= 0; i--) {
+    const s = backSteps[i];
+    await showWord(column, s.word, 'backward', `↑${s.step}`, s.debt, s.wormhole);
+    await sleep(800 + i * 100);
+  }
+
+  // Origin
+  await showWord(column, `● ${seedWord} ●`, 'origin', '', 0, false);
+  await sleep(600);
+
+  // Forward steps (bottom)
+  for (let i = 0; i < fwdSteps.length; i++) {
+    const s = fwdSteps[i];
+    await showWord(column, s.word, 'forward', `↓${s.step}`, s.debt, s.wormhole);
+    await sleep(800 + i * 100);
+  }
+
+  // Evaluate MetaJanus prophecy
+  const avgDebt = [...fwdSteps, ...backSteps].reduce((s,x) => s + x.debt, 0) / STEPS;
+  const error = Math.abs(predictedEntropy - avgDebt);
+  META.prophecyAccuracy = 0.9 * META.prophecyAccuracy + 0.1 * (1 - error);
+  META.totalPredictions++;
+
+  updateMetrics();
+}
+
+function showWord(container, word, cls, label, debt, isWormhole) {
+  return new Promise(resolve => {
+    const div = document.createElement('div');
+    div.className = `word-line ${cls}${isWormhole ? ' wormhole' : ''}`;
+    let html = '';
+    if (label) html += `<span class="step-num">${label}</span>`;
+    html += word;
+    if (debt > 0) html += `<span class="step-debt">debt=${debt.toFixed(2)}</span>`;
+    if (isWormhole) html += `<span class="step-debt"> ⊕WH</span>`;
+    div.innerHTML = html;
+    container.appendChild(div);
+    setTimeout(resolve, 100);
+  });
+}
+
+function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
+
+function updateMetrics() {
+  const days = calendarDaysSinceEpoch();
+  const drift = calendarCumulativeDrift(days).toFixed(2);
+  const diss = calendarDissonance(days).toFixed(3);
+  const pd = personalDissonance().toFixed(3);
+  const blend = getBlendAlpha().toFixed(3);
+  document.getElementById('metrics').textContent =
+    `drift=${drift}  diss=${diss}  personal=${pd}  blend=${blend}  ` +
+    `debt=${prophecyDebt.toFixed(3)}  prophecy_acc=${META.prophecyAccuracy.toFixed(3)}`;
+}
+
+// ═══ TRAINING — BPE-like, word prediction ═══
+let trainData = null;
+let trainStep = 0;
+
+async function trainOnText() {
+  const text = prompt('Paste training text (or cancel):');
+  if (!text || text.length < 50) return;
+
+  const ids = tokenizeText(text);
+  if (ids.length < STEPS + 1) { alert('Text too short'); return; }
+
+  trainData = ids;
+  const status = document.getElementById('train-status');
+  const totalSteps = 2000;
+  const lr = 0.001;
+
+  status.textContent = `Training: 0/${totalSteps}`;
+
+  for (let step = 0; step < totalSteps; step++) {
+    const offset = Math.floor(Math.random() * (ids.length - STEPS - 1));
+    let loss = 0;
+
+    for (let s = 0; s < STEPS; s++) {
+      const ctxIds = ids.slice(offset, offset + s + 1);
+      const target = ids[offset + s + 1];
+
+      // Pool context embedding
+      const ctx = new Float32Array(DIM);
+      for (const id of ctxIds)
+        for (let d = 0; d < DIM; d++) ctx[d] += embedA[id*DIM+d];
+      const inv = 1 / ctxIds.length;
+      for (let d = 0; d < DIM; d++) ctx[d] *= inv;
+
+      // RRPRAM: query = ctx @ Wr
+      const query = new Float32Array(DIM);
+      for (let i = 0; i < DIM; i++) {
+        let s2 = 0;
+        for (let j = 0; j < DIM; j++) s2 += stepWrA[s][i*DIM+j] * ctx[j];
+        query[i] = s2;
+      }
+
+      // RMSNorm
+      let ss = 0;
+      for (let i = 0; i < DIM; i++) ss += query[i]*query[i];
+      const rmsinv = 1 / Math.sqrt(ss/DIM + 1e-5);
+      const qn = new Float32Array(DIM);
+      for (let i = 0; i < DIM; i++) qn[i] = stepRmsA[s][i] * query[i] * rmsinv;
+
+      // Logits = E^T @ qn
+      const logits = new Float32Array(NWORDS);
+      for (let v = 0; v < NWORDS; v++) {
+        let sc = 0;
+        for (let d = 0; d < DIM; d++) sc += embedA[v*DIM+d] * qn[d];
+        logits[v] = sc;
+      }
+
+      // Softmax + loss
+      let mx = logits[0];
+      for (let i = 1; i < NWORDS; i++) if (logits[i] > mx) mx = logits[i];
+      let total = 0;
+      for (let i = 0; i < NWORDS; i++) { logits[i] = Math.exp(logits[i] - mx); total += logits[i]; }
+      for (let i = 0; i < NWORDS; i++) logits[i] /= total;
+
+      const p = Math.max(1e-10, logits[target]);
+      loss -= Math.log(p);
+
+      // Gradient: d_logits = probs - one_hot
+      const dLogits = new Float32Array(logits);
+      dLogits[target] -= 1;
+
+      // Update embeddings (SGD with Chuck-like modulation)
+      const chuckMod = 1.0; // simplified for browser
+      for (let v = 0; v < NWORDS; v++) {
+        if (Math.abs(dLogits[v]) < 1e-6) continue;
+        for (let d = 0; d < DIM; d++)
+          embedA[v*DIM+d] -= lr * chuckMod * dLogits[v] * qn[d];
+      }
+
+      // Update Wr gradients
+      for (let i = 0; i < DIM; i++)
+        for (let j = 0; j < DIM; j++)
+          stepWrA[s][i*DIM+j] -= lr * chuckMod * 0.01 * qn[i] * ctx[j];
+    }
+
+    // Also train matrix B on even steps
+    if (step % 2 === 0) {
+      const off2 = Math.floor(Math.random() * (ids.length - 2));
+      const target2 = ids[off2 + 1];
+      const ctx2 = new Float32Array(DIM);
+      for (let d = 0; d < DIM; d++) ctx2[d] = embedB[ids[off2]*DIM+d];
+      for (let v = 0; v < NWORDS; v++) {
+        let sc = 0;
+        for (let d = 0; d < DIM; d++) sc += embedB[v*DIM+d] * ctx2[d];
+        const grad = (v === target2 ? -1 : 0) + 0.001;
+        for (let d = 0; d < DIM; d++)
+          embedB[v*DIM+d] -= lr * grad * ctx2[d] * 0.1;
+      }
+    }
+
+    trainStep = step + 1;
+    if (step % 100 === 0) {
+      const avgLoss = loss / STEPS;
+      status.textContent = `Training: ${step}/${totalSteps}  loss=${avgLoss.toFixed(4)}`;
+      await sleep(1);
+    }
+  }
+  status.textContent = `Training complete: ${totalSteps} steps`;
+}
+
+// ═══ EVENT HANDLERS ═══
+const inputEl = document.getElementById('prompt');
+const sendBtn = document.getElementById('send');
+const trainBtn = document.getElementById('train-btn');
+
+async function submit() {
+  const text = inputEl.value.trim();
+  if (!text) return;
+  inputEl.value = '';
+  await runChain(text);
+}
+
+inputEl.addEventListener('keydown', e => { if (e.key === 'Enter') submit(); });
+sendBtn.addEventListener('click', submit);
+trainBtn.addEventListener('click', trainOnText);
+
+// Initial metrics
+updateMetrics();
+</script>
+</body>
+</html>
