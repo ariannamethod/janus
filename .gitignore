@@ -1,0 +1,8 @@
+fetched_sources/
+janus
+janus-hybrid
+janus-bpe
+metajanus
+*.bin
+*.o
+*.weights.pkl
