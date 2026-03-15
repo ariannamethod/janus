@@ -189,7 +189,7 @@ Janus's associative reasoning differs fundamentally from standard autoregressive
 
 ### The Process
 
-1. **Prompt Analysis** — The input is tokenized and the most "charged" word (highest resonance with existing co-occurrences) is identified as the origin.
+1. **Prompt Analysis** — The full Janus processes the entire input sentence as a whole through hybrid attention (QKV + RRPRAM + Janus self-resonance). NanoJanus (browser/Python versions) additionally identifies the most "charged" word as the origin for its word-level chain — this is a NanoJanus-specific behavior, not part of the full architecture.
 
 2. **Internal Prophecy** — MetaJanus predicts the expected entropy of the generation before it begins, based on current prophecy debt, calendar dissonance, and personal dissonance.
 
@@ -293,37 +293,41 @@ cc metajanus.c -O2 -lm -o metajanus
 ```
 
 ### `nanojanus.html` — Browser Version
-Web-based NanoJanus, styled after [Penelope](https://github.com/ariannamethod/1984). Word-level output with dual tokenizer (BPE-like internal embeddings + word-level output). 1984-word vocabulary loaded from `nanojanus.txt` (with inline fallback). Dark theme with color-coded bi-directional steps (orange ↑ backward, blue ↓ forward, gold ● origin).
+Web-based NanoJanus, styled after [Penelope](https://github.com/ariannamethod/1984). Dual tokenizer architecture matching penelope.c: real BPE input (2048 vocab, 1792 merges from penelope.c) with word-level output (1984 vocab). Dark theme with color-coded bi-directional steps (orange ↑ backward, blue ↓ forward, gold ● origin).
 
 Features:
-- 1984-word vocabulary (matching Penelope's count from [1984](https://github.com/ariannamethod/1984))
-- 3-stage dual tokenizer: exact match → suffix stemming → greedy BPE decomposition
-- Vocabulary loaded from `nanojanus.txt` (async fetch, falls back to inline array for file:// protocol)
-- Interactive text input
-- In-browser training on pasted text (2000 steps, word-level prediction)
-- Calendar Drift computed in real-time
-- MetaJanus birth snapshot on page load
-- Kuramoto chambers + Dario equation
-- Dual weight matrices blended by calendar state
-- 12 bi-directional reasoning steps visualized
+- Real BPE tokenizer: 2048 subword vocab, 1792 byte-pair merges (identical to penelope.c)
+- Dual embeddings: `embed_in[2048×64]` (BPE input) + `embed_out[1984×64]` (word output), no weight tying
+- RRPRAM forward in generation: `pool_context → Wr → RMSNorm → SwiGLU → logits`
+- Dario equation overlay on top of learned logits (Hebbian, Prophecy, Destiny)
+- Dual weight matrices (A + B) blended by calendar drift + prophecy debt
+- 1984-word vocabulary loaded from `nanojanus.txt` (async fetch, falls back to inline array)
+- Precomputed BPE encoding for each vocab word (for context accumulation during generation)
+- In-browser training with Chuck optimizer modulation (2000 steps)
+- Calendar Drift, MetaJanus birth snapshot, Kuramoto chambers (6 oscillators)
+- 12 bi-directional reasoning steps with "charged word" origin selection
+- ~1.2M params per matrix (~2.4M dual)
 
-Open `nanojanus.html` in any modern browser. No server needed for the inline fallback; serve with any HTTP server (e.g. `python3 -m http.server`) for nanojanus.txt loading.
+Open `nanojanus.html` in any modern browser. No server needed for the inline fallback; serve with any HTTP server for nanojanus.txt loading.
 
-### `nanojanus.py` — Python Version
-Python port of nanojanus with identical architecture. CLI-based with `--generate` and `--train` modes.
+### `nanojanus.py` — Python CLI Version
+Python port matching nanojanus.html's architecture exactly. CLI-based with `--generate` and `--train` modes.
 
 ```bash
 python3 nanojanus.py --generate "the darkness of void"
-python3 nanojanus.py --train shakespeare.txt
+python3 nanojanus.py --train shakespeare.txt --steps 2000
 ```
 
 Features:
-- Loads vocabulary from `nanojanus.txt` (1984 words)
-- Same 3-stage tokenizer (exact → stem → greedy BPE decomposition)
+- Real BPE tokenizer: 2048 subword vocab, 1792 byte-pair merges (identical to penelope.c and nanojanus.html)
+- Dual embeddings: `embed_in[2048×64]` (BPE) + `embed_out[1984×64]` (word), no weight tying
+- RRPRAM forward: `pool_context → Wr → RMSNorm → SwiGLU → logits`
+- Dario equation overlay on learned logits
+- Simultaneous bidirectional generation (interleaved forward + backward)
 - All AML physics, Calendar Drift, MetaJanus, Kuramoto chambers, dual matrices
-- 12 bi-directional reasoning steps with formatted terminal output
-- Training with Chuck-like optimizer modulation
+- Training with Chuck optimizer (macro patience, stagnation noise)
 - Save/load weights via pickle (`nanojanus.weights.pkl`)
+- BPE encoding verified identical to HTML version
 
 ### `nanojanus.txt` — Vocabulary File
 1984 words organized in 29 semantic categories (body, nature, emotion, time, society, abstract, action, material, food, architecture, relationship, philosophy, music, weather, ritual, labor, geometry, animal, textile, transport, domestic, communication, medical, cosmic, bureaucracy, mythic, textual, psychological, final stratum). One word per line.
