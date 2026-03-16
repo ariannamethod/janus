@@ -53,6 +53,19 @@
     opacity: 0.5;
   }
 
+  #mode-indicator {
+    position: fixed;
+    top: 18px;
+    left: 28px;
+    font-size: 10px;
+    letter-spacing: 2px;
+    color: var(--ghost);
+    user-select: none;
+    opacity: 0.6;
+    text-transform: uppercase;
+  }
+  #mode-indicator.trained { color: #4a9eff; opacity: 0.8; }
+
   #metrics {
     position: fixed;
     top: 50px;
@@ -153,6 +166,26 @@
 
   @keyframes fade-in { to { opacity: 1; } }
 
+  /* weight load button */
+  #load-weights-btn {
+    position: fixed;
+    bottom: 70px;
+    right: 28px;
+    font-family: var(--serif);
+    font-size: 10px;
+    letter-spacing: 2px;
+    color: var(--ghost);
+    background: none;
+    border: 1px solid #333;
+    padding: 3px 10px;
+    cursor: pointer;
+    text-transform: uppercase;
+    transition: all 0.2s ease;
+    user-select: none;
+  }
+  #load-weights-btn:hover { color: var(--fg); border-color: var(--fg); }
+  #weight-file { display: none; }
+
   /* input */
   #input-bar {
     position: fixed;
@@ -201,12 +234,16 @@
 <body>
 
 <div id="logo">N A N O J A N U S</div>
-<div id="janus-faces">◄ ►</div>
+<div id="janus-faces">&#9668; &#9658;</div>
+<div id="mode-indicator">field</div>
 <div id="metrics"></div>
 
 <div id="arena">
   <div id="column"></div>
 </div>
+
+<button id="load-weights-btn">load weights</button>
+<input type="file" id="weight-file" accept=".bin">
 
 <div id="input-bar">
   <input id="prompt" type="text" placeholder="speak to janus..." autofocus />
@@ -214,34 +251,57 @@
 </div>
 
 <script>
-// ═══════════════════════════════════════════════════════════════
-// NANOJANUS — Bi-directional associative reasoning in the browser
+// ===================================================================
+// NANOJANUS — Resonance Engine. Bi-directional associative reasoning.
 //
-// Architecture (matching penelope.c from 1984 repo):
-//   - Real BPE input tokenizer (2048 vocab, 1792 merges)
-//   - Word-level output (1984 vocab)
-//   - Dual embed: embed_in[2048×DIM] + embed_out[1984×DIM]
-//   - RRPRAM per-step: pool → Wr → RMSNorm → SwiGLU → logits
-//   - Dario equation overlay on top of learned logits
-//   - Dual weight matrices blended by calendar drift
-//   - 12 bi-directional steps (forward + backward)
-//   - Kuramoto chambers (6 coupled oscillators)
-//   - MetaJanus birth date mathematical "self"
-//   - Chuck optimizer for training
+// Two modes:
+//   FIELD MODE  — weightless. Dario field only. Works out of the box.
+//   TRAINED MODE — 8-layer transformer with RoPE, RRPRAM, SwiGLU.
+//                  Load PEN7 binary weights via file input.
 //
-// NanoJanus-specific (not in full Janus):
-//   - Word-level steps (full Janus generates sentences)
-//   - "Charged word" origin selection from prompt
-//   - Smaller dimensions (DIM=64 vs 288/384)
-// ═══════════════════════════════════════════════════════════════
+// Architecture (trained mode) per layer l:
+//     h = rmsnorm(x, attn_norm_l)
+//     qkv_out = MultiHeadAttention(h; wq_l, wk_l, wv_l, wo_l, RoPE)
+//     rrp = h @ wr_l                            RRPRAM resonance
+//     gate = softmax(gate_l[0], gate_l[1])
+//     x = x + gate[0]*qkv_out + gate[1]*rrp    gated residual
+//     h2 = rmsnorm(x, ffn_norm_l)
+//     x = x + SwiGLU(h2; w_gate_l, w_up_l, w_down_l)  residual
+//
+// After 8 layers:
+//     logits = rmsnorm(x, final_norm) @ lm_head^T
+//     word_score(w) = mean(logits[bpe_tokens(w)]) + DarioField
+//
+// Constants: DIM=448, HDIM=896, N_HEADS=7, HEAD_DIM=64,
+//            N_LAYERS=8, MAX_SEQ=256, BPE_VOCAB=2048, STEPS=12
+//
+// by Arianna Method.
+// ===================================================================
 
+const DIM = 448;
+const HDIM = 896;
+const N_HEADS = 7;
+const HEAD_DIM = 64;
+const N_LAYERS = 8;
+const MAX_SEQ = 256;
 const STEPS = 12;
-const DIM = 384;
-const HDIM = 768;
 const BPE_VOCAB = 2048;
 const BPE_MERGES = 1792;
 
-// ═══ BPE MERGE TABLE (from penelope.c / 1984 repo — 1792 merges) ═══
+// === 1984 WORD VOCABULARY (loaded from nanojanus.txt) ===
+const WORDS = [];
+let NWORDS = 0;
+
+// Precomputed BPE encoding for each vocabulary word
+let vocabBpe = [];
+
+// Extended vocabulary: hardcoded words + whole-word BPE tokens
+let extVocab = [];
+
+// Model state: null = field mode, object = trained mode
+let model = null;
+
+// === BPE MERGE TABLE (from penelope.c / 1984 repo -- 1792 merges) ===
 const BPE_TABLE = [
 [115,32],[101,32],[46,32],[105,110],[105,256],[101,114],[111,110],[116,104],[116,32],[101,110],[97,110],[116,105],[104,260],[101,115],[121,32],[258,268],[100,32],[111,114],[259,103],[97,114],
 [97,108],[274,32],[267,262],[111,117],[101,256],[114,101],[111,32],[105,116],[97,116],[58,32],[111,109],[115,116],[100,105],[101,108],[104,97],[114,269],[112,261],[261,32],[263,257],[266,272],
@@ -335,33 +395,18 @@ const BPE_TABLE = [
 [1716,476],[1982,302],[103,394],[104,638],[108,354],[276,105],[304,109],[312,1324],[613,1986],[742,1322],[1074,112]
 ];
 
-// ═══ 1984 WORD VOCABULARY (loaded from nanojanus.txt) ═══
-const WORDS = [];
-let NWORDS = 0;
-const VOCAB_LENS = [];
+// === STOPWORDS ===
+const STOP = new Set("i me my we our you your he she it they them the a an and or but in on at to for of is am are was were be been being have has had do does did will would shall should can could may might must not no nor so if then than that this these those what which who whom how when where why all each every some any few many much more most other another such".split(" "));
 
-// Precomputed BPE encoding for each vocabulary word
-let vocabBpe = [];
-
-// Extended vocabulary: hardcoded words + whole-word BPE tokens
-// Each entry: {word: string, bpeIds: number[], fromHardcoded: boolean, origIdx: number}
-// origIdx = index in WORDS[] for hardcoded, -1 for BPE-derived
-let extVocab = [];
-
-// Weight loading state
-let hasWeights = false;
-
-// ═══ BPE TOKENIZER (real byte-pair encoding, from penelope.c) ═══
+// === BPE TOKENIZER ===
 
 function bpeEncode(text) {
-  // 1. Convert to lowercase byte values
   let seq = [];
   for (let i = 0; i < text.length; i++) {
     let c = text.charCodeAt(i);
     if (c >= 65 && c <= 90) c = c - 65 + 97;
     if (c < 256) seq.push(c);
   }
-  // 2. Apply merges in priority order
   for (let m = 0; m < BPE_MERGES; m++) {
     const left = BPE_TABLE[m][0], right = BPE_TABLE[m][1];
     const newId = 256 + m;
@@ -379,23 +424,13 @@ function bpeEncode(text) {
   return seq;
 }
 
-function initVocabBpe() {
-  vocabBpe = [];
-  for (let i = 0; i < NWORDS; i++)
-    vocabBpe.push(bpeEncode(WORDS[i]));
-}
-
-// ═══ BPE DECODE — build reverse mapping from token ID to string ═══
-// Base tokens 0..255 = single bytes. Each merge m creates token (256+m)
-// by concatenating the strings of its two operands.
+// === BPE DECODE TABLE ===
 const bpeStrs = [];
 
 function buildBpeStrs() {
   bpeStrs.length = 0;
-  // Base: each byte is its character
   for (let i = 0; i < 256; i++)
     bpeStrs.push(String.fromCharCode(i));
-  // Merges: token (256+m) = concat of left and right operand strings
   for (let m = 0; m < BPE_MERGES; m++) {
     const left = BPE_TABLE[m][0], right = BPE_TABLE[m][1];
     bpeStrs.push((bpeStrs[left] || '') + (bpeStrs[right] || ''));
@@ -408,12 +443,19 @@ function bpeDecode(tokenId) {
   return '';
 }
 
-// ═══ EXTENDED VOCAB — hardcoded words + whole-word BPE tokens ═══
+function initVocabBpe() {
+  vocabBpe = [];
+  for (let i = 0; i < NWORDS; i++)
+    vocabBpe.push(bpeEncode(WORDS[i]));
+}
+
+// === EXTENDED VOCAB ===
+const SUFFIX_FRAGMENTS = new Set(["ing","tion","ment","ness","ble","ful","ous","ive","ent","ant","ist","ity","ght","est","ter","ther","ted","ting","ally","ling"]);
+
 function buildExtendedVocab() {
   extVocab = [];
   const wordSet = new Set();
 
-  // 1. All hardcoded vocabulary words (with their precomputed BPE encodings)
   for (let i = 0; i < NWORDS; i++) {
     extVocab.push({
       word: WORDS[i],
@@ -424,22 +466,20 @@ function buildExtendedVocab() {
     wordSet.add(WORDS[i].toLowerCase());
   }
 
-  // 2. Scan every BPE token (0..BPE_VOCAB-1) for whole words
-  //    A "whole word" = only lowercase a-z, length >= 2
   if (bpeStrs.length === 0) buildBpeStrs();
-  const wholeWordRe = /^[a-z]{2,}$/;
   let bpeAdded = 0;
 
   for (let t = 0; t < BPE_VOCAB; t++) {
     const s = bpeStrs[t];
-    if (!s) continue;
+    if (!s || s.length < 3) continue;
+    if (!/^[a-zA-Z]+$/.test(s)) continue;
     const lower = s.toLowerCase();
-    if (!wholeWordRe.test(lower)) continue;
     if (wordSet.has(lower)) continue;
-    // This BPE token decodes to a whole word not in hardcoded vocab
+    if (STOP.has(lower)) continue;
+    if (SUFFIX_FRAGMENTS.has(lower)) continue;
     extVocab.push({
       word: lower,
-      bpeIds: [t],  // single token encodes the whole word
+      bpeIds: [t],
       fromHardcoded: false,
       origIdx: -1
     });
@@ -447,12 +487,11 @@ function buildExtendedVocab() {
     bpeAdded++;
   }
 
-  const hardcoded = NWORDS;
   console.log('[nanojanus] extended vocab: ' + extVocab.length + ' words (' +
-    hardcoded + ' hardcoded + ' + bpeAdded + ' from BPE)');
+    NWORDS + ' hardcoded + ' + bpeAdded + ' from BPE)');
 }
 
-// Word-level tokenizer (for finding "charged word" origin — nanojanus-specific)
+// === WORD TOKENIZER (for origin extraction and Dario overlay) ===
 const SUFFIXES = ['ing','tion','sion','ment','ness','able','ible','ful','less','ous','ive','ity','ary','ery','ory','al','ly','er','ed','es','en','s'];
 
 function tryStem(word) {
@@ -469,6 +508,7 @@ function tokenizeWords(text) {
   const words = text.toLowerCase().replace(/[^a-z\s]/g, '').split(/\s+/).filter(w => w.length > 0);
   const ids = [];
   for (const w of words) {
+    if (STOP.has(w)) continue;
     const idx = WORDS.indexOf(w);
     if (idx >= 0) { ids.push(idx); continue; }
     const stemIdx = tryStem(w);
@@ -477,7 +517,7 @@ function tokenizeWords(text) {
   return ids;
 }
 
-// ═══ CALENDAR DRIFT (from ariannamethod.c) ═══
+// === CALENDAR DRIFT (from ariannamethod.c) ===
 const AM_ANNUAL_DRIFT = 11.25;
 const AM_GREGORIAN_YEAR = 365.25;
 const AM_METONIC_YEARS = 19;
@@ -508,7 +548,7 @@ function calendarDissonance(days) {
   return Math.max(0, Math.min(1, raw));
 }
 
-// ═══ METAJANUS — birth snapshot ═══
+// === METAJANUS -- birth snapshot ===
 const META = {
   birthDays: calendarDaysSinceEpoch(),
   birthDrift: calendarCumulativeDrift(calendarDaysSinceEpoch()),
@@ -523,7 +563,7 @@ function personalDissonance() {
   return Math.max(0, Math.min(1, Math.abs(nowDrift - META.birthDrift) / AM_MAX_UNCORRECTED));
 }
 
-// ═══ AML PHYSICS ═══
+// === AML PHYSICS ===
 let prophecyDebt = 0;
 let destinyBias = 0.1;
 let wormhole = 0.02;
@@ -538,7 +578,7 @@ function computeProphecyDebt(scores, chosenIdx) {
   return diff > 0 ? diff / (diff + 1) : 0;
 }
 
-// ═══ KURAMOTO CHAMBERS ═══
+// === KURAMOTO CHAMBERS ===
 const CH = { FEAR: 0, LOVE: 1, RAGE: 2, VOID: 3, FLOW: 4, COMPLEX: 5, N: 6 };
 const chambers = new Float32Array(CH.N);
 const chDecay = [0.95, 0.95, 0.93, 0.96, 0.94, 0.97];
@@ -558,102 +598,7 @@ function updateChambers(stepIdx) {
   }
 }
 
-// ═══ DUAL WEIGHT MATRICES — BPE input + word output (no weight tying) ═══
-let embed_in_A, embed_in_B;     // [BPE_VOCAB * DIM] — BPE subword input embeddings
-let embed_out_A, embed_out_B;   // [NWORDS * DIM]    — word output embeddings
-const stepWrA = [], stepWrB = [];
-const stepRmsA = [], stepRmsB = [];
-const stepGateA = [], stepUpA = [], stepDownA = [];
-const stepGateB = [], stepUpB = [], stepDownB = [];
-
-function initWeights() {
-  const scale = Math.sqrt(2 / DIM) * 0.02;
-  const scaleBpe = Math.sqrt(2 / BPE_VOCAB) * 0.02;
-
-  embed_in_A = new Float32Array(BPE_VOCAB * DIM);
-  embed_in_B = new Float32Array(BPE_VOCAB * DIM);
-  embed_out_A = new Float32Array(NWORDS * DIM);
-  embed_out_B = new Float32Array(NWORDS * DIM);
-
-  for (let i = 0; i < BPE_VOCAB * DIM; i++) {
-    embed_in_A[i] = (Math.random() - 0.5) * scaleBpe;
-    embed_in_B[i] = (Math.random() - 0.5) * scaleBpe;
-  }
-  for (let i = 0; i < NWORDS * DIM; i++) {
-    embed_out_A[i] = (Math.random() - 0.5) * scale;
-    embed_out_B[i] = (Math.random() - 0.5) * scale;
-  }
-
-  stepWrA.length = 0; stepWrB.length = 0;
-  stepRmsA.length = 0; stepRmsB.length = 0;
-  stepGateA.length = 0; stepUpA.length = 0; stepDownA.length = 0;
-  stepGateB.length = 0; stepUpB.length = 0; stepDownB.length = 0;
-
-  for (let s = 0; s < STEPS; s++) {
-    stepWrA.push(new Float32Array(DIM * DIM));
-    stepWrB.push(new Float32Array(DIM * DIM));
-    stepRmsA.push(new Float32Array(DIM).fill(1));
-    stepRmsB.push(new Float32Array(DIM).fill(1));
-    // gate/up: [HDIM × DIM], down: [DIM × HDIM] (matches penelope.c layout)
-    stepGateA.push(new Float32Array(HDIM * DIM));
-    stepUpA.push(new Float32Array(HDIM * DIM));
-    stepDownA.push(new Float32Array(DIM * HDIM));
-    stepGateB.push(new Float32Array(HDIM * DIM));
-    stepUpB.push(new Float32Array(HDIM * DIM));
-    stepDownB.push(new Float32Array(DIM * HDIM));
-    for (let i = 0; i < DIM * DIM; i++) {
-      stepWrA[s][i] = (Math.random() - 0.5) * scale;
-      stepWrB[s][i] = (Math.random() - 0.5) * scale;
-    }
-    for (let i = 0; i < HDIM * DIM; i++) {
-      stepGateA[s][i] = (Math.random() - 0.5) * scale;
-      stepUpA[s][i] = (Math.random() - 0.5) * scale;
-      stepGateB[s][i] = (Math.random() - 0.5) * scale;
-      stepUpB[s][i] = (Math.random() - 0.5) * scale;
-    }
-    for (let i = 0; i < DIM * HDIM; i++) {
-      stepDownA[s][i] = (Math.random() - 0.5) * scale;
-      stepDownB[s][i] = (Math.random() - 0.5) * scale;
-    }
-  }
-}
-
-// ═══ ASYNC VOCABULARY LOADING ═══
-async function loadVocabulary() {
-  try {
-    const resp = await fetch('nanojanus.txt');
-    if (!resp.ok) throw new Error('fetch failed: ' + resp.status);
-    const text = await resp.text();
-    const lines = text.split('\n').map(l => l.trim()).filter(l => l.length > 0);
-    WORDS.length = 0;
-    for (const l of lines) WORDS.push(l);
-  } catch(e) {
-    document.getElementById('column').innerHTML =
-      '<div style="color:#ff6b4a;font-size:16px;text-align:center;padding:40px">' +
-      'nanojanus.txt not found.<br>Serve with: python3 -m http.server</div>';
-    console.error('[nanojanus] ' + e.message);
-    return;
-  }
-  VOCAB_LENS.length = 0;
-  for (const w of WORDS) VOCAB_LENS.push(w.length);
-  NWORDS = WORDS.length;
-  initWeights();
-  initVocabBpe();
-  buildBpeStrs();
-  buildExtendedVocab();
-  updateMetrics();
-  console.log('[nanojanus] ready: ' + NWORDS + ' words, BPE vocab ' + BPE_VOCAB + ', ' + BPE_MERGES + ' merges');
-}
-loadVocabulary();
-
-// ═══ BLEND ═══
-function getBlendAlpha() {
-  const cd = calendarDissonance(calendarDaysSinceEpoch());
-  const pd = personalDissonance();
-  return Math.max(0, Math.min(1, 0.5 + 0.3*(cd-0.5) - 0.2*prophecyDebt + 0.1*pd));
-}
-
-// ═══ CO-OCCURRENCE + BIGRAMS ═══
+// === CO-OCCURRENCE + BIGRAMS ===
 const cooc = new Map();
 const bigrams = new Map();
 
@@ -672,175 +617,268 @@ function getBigram(prev, next) {
   return bigrams.get(prev + ',' + next) || 0;
 }
 
-// ═══ FORWARD STEP — pool_context → Wr → RMSNorm → SwiGLU → logits ═══
-// Architecture from penelope.c, adapted for Janus dual matrices
+// ===================================================================
+// RESONANCE ENGINE -- 8-layer transformer (JS implementation)
+//
+// Matches penelope.c v7 forward pass exactly:
+//   RMSNorm, RoPE, multi-head causal self-attention,
+//   RRPRAM resonance with gated blend, SwiGLU FFN
+// ===================================================================
 
-function silu(x) { return x > -20 ? x / (1 + Math.exp(-x)) : 0; }
+function silu(x) {
+  return x > -20.0 ? x / (1.0 + Math.exp(-x)) : 0.0;
+}
 
-function forwardStep(bpeIds, stepIdx) {
-  const s = stepIdx % STEPS;
-  const a = getBlendAlpha(), b = 1 - a;
-
-  // Pool context: average blended embed_in over all BPE tokens
-  const ctx = new Float32Array(DIM);
-  const n = bpeIds.length || 1;
-  for (const id of bpeIds) {
-    if (id >= BPE_VOCAB) continue;
-    for (let d = 0; d < DIM; d++)
-      ctx[d] += a * embed_in_A[id*DIM+d] + b * embed_in_B[id*DIM+d];
-  }
-  for (let d = 0; d < DIM; d++) ctx[d] /= n;
-
-  // RRPRAM: query = ctx @ Wr (blended)
-  const query = new Float32Array(DIM);
-  for (let i = 0; i < DIM; i++) {
-    let sum = 0;
-    for (let j = 0; j < DIM; j++)
-      sum += (a*stepWrA[s][i*DIM+j] + b*stepWrB[s][i*DIM+j]) * ctx[j];
-    query[i] = sum;
-  }
-
-  // RMSNorm
+function rmsnorm(x, g, n) {
   let ss = 0;
-  for (let i = 0; i < DIM; i++) ss += query[i]*query[i];
-  const rmsInv = 1 / Math.sqrt(ss/DIM + 1e-5);
-  const qn = new Float32Array(DIM);
-  for (let i = 0; i < DIM; i++)
-    qn[i] = (a*stepRmsA[s][i] + b*stepRmsB[s][i]) * query[i] * rmsInv;
+  for (let i = 0; i < n; i++) ss += x[i] * x[i];
+  ss = ss / n + 1e-5;
+  const inv = 1.0 / Math.sqrt(ss);
+  const out = new Float32Array(n);
+  for (let i = 0; i < n; i++) out[i] = g[i] * x[i] * inv;
+  return out;
+}
 
-  // SwiGLU: gate[HDIM] = W_gate[HDIM,DIM] @ qn[DIM]
-  const gate = new Float32Array(HDIM);
-  const up = new Float32Array(HDIM);
-  for (let i = 0; i < HDIM; i++) {
-    let sg = 0, su = 0;
-    for (let j = 0; j < DIM; j++) {
-      sg += (a*stepGateA[s][i*DIM+j] + b*stepGateB[s][i*DIM+j]) * qn[j];
-      su += (a*stepUpA[s][i*DIM+j] + b*stepUpB[s][i*DIM+j]) * qn[j];
+function matmulMV(W, x, rows, cols) {
+  const out = new Float32Array(rows);
+  for (let i = 0; i < rows; i++) {
+    let s = 0;
+    const off = i * cols;
+    for (let j = 0; j < cols; j++) s += W[off + j] * x[j];
+    out[i] = s;
+  }
+  return out;
+}
+
+function applyRope(q, k, seqLen, nHeads, headDim) {
+  const thetaBase = 10000.0;
+  for (let t = 0; t < seqLen; t++) {
+    for (let h = 0; h < nHeads; h++) {
+      const base = (t * nHeads + h) * headDim;
+      for (let d = 0; d < headDim / 2; d++) {
+        const freq = 1.0 / Math.pow(thetaBase, 2.0 * d / headDim);
+        const cosF = Math.cos(t * freq);
+        const sinF = Math.sin(t * freq);
+        const q0 = q[base + d], q1 = q[base + d + headDim / 2];
+        q[base + d] = q0 * cosF - q1 * sinF;
+        q[base + d + headDim / 2] = q0 * sinF + q1 * cosF;
+        const k0 = k[base + d], k1 = k[base + d + headDim / 2];
+        k[base + d] = k0 * cosF - k1 * sinF;
+        k[base + d + headDim / 2] = k0 * sinF + k1 * cosF;
+      }
     }
-    gate[i] = sg;
-    up[i] = su;
   }
-  const swiglu = new Float32Array(HDIM);
-  for (let i = 0; i < HDIM; i++)
-    swiglu[i] = silu(gate[i]) * up[i];
+}
 
-  // Down: hidden[DIM] = W_down[DIM,HDIM] @ swiglu[HDIM]
-  const hidden = new Float32Array(DIM);
-  for (let i = 0; i < DIM; i++) {
-    let sum = 0;
-    for (let j = 0; j < HDIM; j++)
-      sum += (a*stepDownA[s][i*HDIM+j] + b*stepDownB[s][i*HDIM+j]) * swiglu[j];
-    hidden[i] = sum;
-  }
+// Full forward pass: bpeIds[seqLen] -> logits[BPE_VOCAB]
+function forward(m, bpeIds) {
+  let S = bpeIds.length;
+  if (S < 1) S = 1;
+  if (S > MAX_SEQ) S = MAX_SEQ;
 
-  // Residual
-  const out = new Float32Array(DIM);
-  for (let i = 0; i < DIM; i++) out[i] = qn[i] + hidden[i];
-
-  // Logits = embed_out @ out (separate output embeddings, no weight tying)
-  const logits = new Float32Array(NWORDS);
-  for (let v = 0; v < NWORDS; v++) {
-    let sum = 0;
+  const x = new Float32Array(S * DIM);
+  for (let t = 0; t < S; t++) {
+    let tok = bpeIds[t];
+    if (tok < 0 || tok >= BPE_VOCAB) tok = 0;
     for (let d = 0; d < DIM; d++)
-      sum += (a*embed_out_A[v*DIM+d] + b*embed_out_B[v*DIM+d]) * out[d];
-    logits[v] = sum;
+      x[t * DIM + d] = m.tok_emb[tok * DIM + d] + m.pos_emb[t * DIM + d];
   }
 
+  for (let l = 0; l < N_LAYERS; l++) {
+    const lw = m.layers[l];
+
+    // 1. h = rmsnorm(x, attn_norm)
+    const h = new Float32Array(S * DIM);
+    for (let t = 0; t < S; t++) {
+      const xSlice = x.subarray(t * DIM, (t + 1) * DIM);
+      const normed = rmsnorm(xSlice, lw.attn_norm, DIM);
+      h.set(normed, t * DIM);
+    }
+
+    // 2. q, k, v projections
+    const q = new Float32Array(S * DIM);
+    const k = new Float32Array(S * DIM);
+    const v = new Float32Array(S * DIM);
+    for (let t = 0; t < S; t++) {
+      const ht = h.subarray(t * DIM, (t + 1) * DIM);
+      q.set(matmulMV(lw.wq, ht, DIM, DIM), t * DIM);
+      k.set(matmulMV(lw.wk, ht, DIM, DIM), t * DIM);
+      v.set(matmulMV(lw.wv, ht, DIM, DIM), t * DIM);
+    }
+
+    // 3. RoPE
+    applyRope(q, k, S, N_HEADS, HEAD_DIM);
+
+    // 4. Multi-head causal attention
+    const scale = 1.0 / Math.sqrt(HEAD_DIM);
+    const av = new Float32Array(S * DIM);
+
+    for (let hd = 0; hd < N_HEADS; hd++) {
+      for (let ti = 0; ti < S; ti++) {
+        const qiBase = (ti * N_HEADS + hd) * HEAD_DIM;
+        const scores = new Float32Array(ti + 1);
+        let maxs = -1e30;
+        for (let tj = 0; tj <= ti; tj++) {
+          const kjBase = (tj * N_HEADS + hd) * HEAD_DIM;
+          let dot = 0;
+          for (let d = 0; d < HEAD_DIM; d++) dot += q[qiBase + d] * k[kjBase + d];
+          dot *= scale;
+          scores[tj] = dot;
+          if (dot > maxs) maxs = dot;
+        }
+        let sum = 0;
+        for (let tj = 0; tj <= ti; tj++) {
+          scores[tj] = Math.exp(scores[tj] - maxs);
+          sum += scores[tj];
+        }
+        const invS = sum > 0 ? 1.0 / sum : 0;
+        for (let tj = 0; tj <= ti; tj++) scores[tj] *= invS;
+
+        const aviBase = (ti * N_HEADS + hd) * HEAD_DIM;
+        for (let tj = 0; tj <= ti; tj++) {
+          const a = scores[tj];
+          if (a === 0) continue;
+          const vjBase = (tj * N_HEADS + hd) * HEAD_DIM;
+          for (let d = 0; d < HEAD_DIM; d++) av[aviBase + d] += a * v[vjBase + d];
+        }
+      }
+    }
+
+    // 5. Project through wo
+    const qkvOut = new Float32Array(S * DIM);
+    for (let t = 0; t < S; t++) {
+      const avt = av.subarray(t * DIM, (t + 1) * DIM);
+      qkvOut.set(matmulMV(lw.wo, avt, DIM, DIM), t * DIM);
+    }
+
+    // 6. RRPRAM resonance: rrp = h @ wr
+    const rrp = new Float32Array(S * DIM);
+    for (let t = 0; t < S; t++) {
+      const ht = h.subarray(t * DIM, (t + 1) * DIM);
+      rrp.set(matmulMV(lw.wr, ht, DIM, DIM), t * DIM);
+    }
+
+    // 7. Gated blend: softmax(gate[0], gate[1])
+    const g0 = lw.gate[0], g1 = lw.gate[1];
+    const gmax = Math.max(g0, g1);
+    const e0 = Math.exp(g0 - gmax), e1 = Math.exp(g1 - gmax);
+    const gsum = e0 + e1;
+    const w0 = e0 / gsum, w1 = e1 / gsum;
+
+    // 8. Residual: x = x + w0*qkvOut + w1*rrp
+    for (let i = 0; i < S * DIM; i++)
+      x[i] += w0 * qkvOut[i] + w1 * rrp[i];
+
+    // 9. h2 = rmsnorm(x, ffn_norm)
+    const h2 = new Float32Array(S * DIM);
+    for (let t = 0; t < S; t++) {
+      const xt = x.subarray(t * DIM, (t + 1) * DIM);
+      h2.set(rmsnorm(xt, lw.ffn_norm, DIM), t * DIM);
+    }
+
+    // 10. SwiGLU FFN: x = x + w_down @ (silu(h2 @ w_gate) * (h2 @ w_up))
+    for (let t = 0; t < S; t++) {
+      const h2t = h2.subarray(t * DIM, (t + 1) * DIM);
+      const fg = matmulMV(lw.w_gate, h2t, HDIM, DIM);
+      const fu = matmulMV(lw.w_up, h2t, HDIM, DIM);
+      const sw = new Float32Array(HDIM);
+      for (let i = 0; i < HDIM; i++) sw[i] = silu(fg[i]) * fu[i];
+      const fd = matmulMV(lw.w_down, sw, DIM, HDIM);
+      for (let d = 0; d < DIM; d++) x[t * DIM + d] += fd[d];
+    }
+  }
+
+  // Final: rmsnorm(x[last], final_norm) @ lm_head^T
+  const xLast = x.subarray((S - 1) * DIM, S * DIM);
+  const xn = rmsnorm(xLast, m.final_norm, DIM);
+  const logits = matmulMV(m.lm_head, xn, BPE_VOCAB, DIM);
   return logits;
 }
 
-// ═══ FORWARD STEP (TRAINED) — same RRPRAM pipeline, but scores via embed_in over extVocab ═══
-// When weights are loaded from training, embed_out is limited to NWORDS.
-// forwardStepTrained scores every word in extVocab by averaging dot products
-// of (blended embed_in) with the hidden output, over each word's BPE tokens.
-// This lets the model produce any word whose BPE encoding maps to learned embeddings.
-
-function forwardStepTrained(bpeIds, stepIdx) {
-  const s = stepIdx % STEPS;
-  const a = getBlendAlpha(), b = 1 - a;
-
-  // Pool context: average blended embed_in over all BPE tokens (identical to forwardStep)
-  const ctx = new Float32Array(DIM);
-  const n = bpeIds.length || 1;
-  for (const id of bpeIds) {
-    if (id >= BPE_VOCAB) continue;
-    for (let d = 0; d < DIM; d++)
-      ctx[d] += a * embed_in_A[id*DIM+d] + b * embed_in_B[id*DIM+d];
-  }
-  for (let d = 0; d < DIM; d++) ctx[d] /= n;
-
-  // RRPRAM: query = ctx @ Wr (blended)
-  const query = new Float32Array(DIM);
-  for (let i = 0; i < DIM; i++) {
-    let sum = 0;
-    for (let j = 0; j < DIM; j++)
-      sum += (a*stepWrA[s][i*DIM+j] + b*stepWrB[s][i*DIM+j]) * ctx[j];
-    query[i] = sum;
-  }
-
-  // RMSNorm
-  let ss = 0;
-  for (let i = 0; i < DIM; i++) ss += query[i]*query[i];
-  const rmsInv = 1 / Math.sqrt(ss/DIM + 1e-5);
-  const qn = new Float32Array(DIM);
-  for (let i = 0; i < DIM; i++)
-    qn[i] = (a*stepRmsA[s][i] + b*stepRmsB[s][i]) * query[i] * rmsInv;
-
-  // SwiGLU
-  const gate = new Float32Array(HDIM);
-  const up = new Float32Array(HDIM);
-  for (let i = 0; i < HDIM; i++) {
-    let sg = 0, su = 0;
-    for (let j = 0; j < DIM; j++) {
-      sg += (a*stepGateA[s][i*DIM+j] + b*stepGateB[s][i*DIM+j]) * qn[j];
-      su += (a*stepUpA[s][i*DIM+j] + b*stepUpB[s][i*DIM+j]) * qn[j];
-    }
-    gate[i] = sg;
-    up[i] = su;
-  }
-  const swiglu = new Float32Array(HDIM);
-  for (let i = 0; i < HDIM; i++)
-    swiglu[i] = silu(gate[i]) * up[i];
-
-  // Down projection
-  const hidden = new Float32Array(DIM);
-  for (let i = 0; i < DIM; i++) {
-    let sum = 0;
-    for (let j = 0; j < HDIM; j++)
-      sum += (a*stepDownA[s][i*HDIM+j] + b*stepDownB[s][i*HDIM+j]) * swiglu[j];
-    hidden[i] = sum;
-  }
-
-  // Residual
-  const out = new Float32Array(DIM);
-  for (let i = 0; i < DIM; i++) out[i] = qn[i] + hidden[i];
-
-  // Score each word in extVocab via embed_in (not embed_out)
-  // For each word: score = mean of dot(blended_embed_in[tok], out) over its BPE tokens
-  const logits = new Float32Array(extVocab.length);
+// BPE logits -> word scores (mean aggregation over BPE tokens per word)
+function bpeLogitsToWordScores(bpeLogits) {
+  const scores = new Float32Array(extVocab.length);
   for (let w = 0; w < extVocab.length; w++) {
-    const ids = extVocab[w].bpeIds;
-    const bpeLen = ids.length || 1;
-    let score = 0;
-    for (const tid of ids) {
-      if (tid >= BPE_VOCAB) continue;
-      let dot = 0;
-      for (let d = 0; d < DIM; d++)
-        dot += (a * embed_in_A[tid*DIM+d] + b * embed_in_B[tid*DIM+d]) * out[d];
-      score += dot;
+    const ew = extVocab[w];
+    const bl = ew.bpeIds.length;
+    let s = 0;
+    for (let b = 0; b < bl; b++) {
+      const tok = ew.bpeIds[b];
+      if (tok >= 0 && tok < BPE_VOCAB) s += bpeLogits[tok];
     }
-    logits[w] = score / bpeLen;
+    scores[w] = bl > 0 ? s / bl : 0;
   }
-
-  return logits;
+  return scores;
 }
 
-// ═══ DARIO OVERLAY — heuristic forces applied on top of learned logits ═══
+// ===================================================================
+// PEN7 BINARY WEIGHT LOADING
+//
+// Format: 32-byte header (8 int32s) + float32 weights
+// Header: [magic=0x50454E37, BPE_VOCAB, NWORDS, DIM, HDIM, N_HEADS, N_LAYERS, MAX_SEQ]
+// ===================================================================
 
-// vocabForOverlay: array of {word, origIdx} — tells darioOverlay which words
-// are in the logits array and what their original WORDS[] index is (for bigram/cooc lookup).
-// For untrained mode: [{word: WORDS[i], origIdx: i}, ...] (length=NWORDS)
-// For trained mode: extVocab entries (origIdx=-1 for BPE-derived words — no bigram/cooc data)
+async function loadWeightsPEN7(buffer) {
+  const headerView = new DataView(buffer, 0, 32);
+  const magic = headerView.getInt32(0, true);
+  if (magic !== 0x50454E37) {
+    throw new Error('Not a PEN7 file (magic=0x' + magic.toString(16) + ')');
+  }
+  const hBpeVocab = headerView.getInt32(4, true);
+  const hNWords = headerView.getInt32(8, true);
+  const hDim = headerView.getInt32(12, true);
+  const hHDim = headerView.getInt32(16, true);
+  const hNHeads = headerView.getInt32(20, true);
+  const hNLayers = headerView.getInt32(24, true);
+  const hMaxSeq = headerView.getInt32(28, true);
+
+  if (hBpeVocab !== BPE_VOCAB || hDim !== DIM ||
+      hHDim !== HDIM || hNHeads !== N_HEADS || hNLayers !== N_LAYERS || hMaxSeq !== MAX_SEQ) {
+    throw new Error('Config mismatch: BV=' + hBpeVocab +
+      ' D=' + hDim + ' H=' + hHDim + ' NH=' + hNHeads + ' NL=' + hNLayers + ' S=' + hMaxSeq);
+  }
+
+  const floats = new Float32Array(buffer, 32);
+  let offset = 0;
+
+  function readFloats(n) {
+    const arr = new Float32Array(n);
+    arr.set(floats.subarray(offset, offset + n));
+    offset += n;
+    return arr;
+  }
+
+  const m = {};
+  m.tok_emb = readFloats(BPE_VOCAB * DIM);
+  m.pos_emb = readFloats(MAX_SEQ * DIM);
+  m.final_norm = readFloats(DIM);
+  m.lm_head = readFloats(BPE_VOCAB * DIM);
+
+  m.layers = [];
+  for (let l = 0; l < N_LAYERS; l++) {
+    const lw = {};
+    lw.attn_norm = readFloats(DIM);
+    lw.wq = readFloats(DIM * DIM);
+    lw.wk = readFloats(DIM * DIM);
+    lw.wv = readFloats(DIM * DIM);
+    lw.wo = readFloats(DIM * DIM);
+    lw.wr = readFloats(DIM * DIM);
+    lw.gate = readFloats(2);
+    lw.ffn_norm = readFloats(DIM);
+    lw.w_gate = readFloats(DIM * HDIM);
+    lw.w_up = readFloats(DIM * HDIM);
+    lw.w_down = readFloats(HDIM * DIM);
+    m.layers.push(lw);
+  }
+
+  const totalParams = offset;
+  console.log('PEN7 loaded: ' + totalParams + ' params (' + (totalParams * 4 / 1e6).toFixed(1) + 'MB)');
+  return m;
+}
+
+// ===================================================================
+// DARIO FIELD -- heuristic forces on top of word scores
+// ===================================================================
 
 function darioOverlay(logits, wordContext, prevWord, stepIdx, direction, vocabForOverlay) {
   const alpha_mod = 1 + 0.3*chambers[CH.LOVE] - 0.2*chambers[CH.RAGE] + 0.1*chambers[CH.FLOW];
@@ -855,7 +893,6 @@ function darioOverlay(logits, wordContext, prevWord, stepIdx, direction, vocabFo
   for (let v = 0; v < nVocab; v++) {
     const oi = vocabForOverlay[v].origIdx;
     let B = 0;
-    // Bigram/cooc only available for words that exist in WORDS[] (origIdx >= 0)
     if (oi >= 0 && prevWord >= 0) B = Math.log(1 + getBigram(prevWord, oi)) * 4;
 
     let H = 0;
@@ -871,18 +908,22 @@ function darioOverlay(logits, wordContext, prevWord, stepIdx, direction, vocabFo
   }
 }
 
-// ═══ WORD SELECTION — forward_step + dario overlay + top-k sampling ═══
+// ===================================================================
+// WORD SELECTION -- trained mode (transformer + Dario) or field mode
+// ===================================================================
 
 function selectWord(bpeContext, wordContext, prevWord, stepIdx, forbidden, direction) {
   let logits, vocab;
 
-  if (hasWeights && extVocab.length > 0) {
-    // Trained mode: use forwardStepTrained over extended vocab
-    logits = forwardStepTrained(bpeContext, stepIdx);
+  if (model !== null && extVocab.length > 0) {
+    // Trained mode: full 8-layer transformer forward pass
+    const ids = bpeContext.length > MAX_SEQ ? bpeContext.slice(bpeContext.length - MAX_SEQ) : bpeContext;
+    const bpeLogits = forward(model, ids);
+    logits = bpeLogitsToWordScores(bpeLogits);
     vocab = extVocab;
   } else {
-    // Untrained mode: use forwardStep over NWORDS hardcoded vocab
-    logits = forwardStep(bpeContext, stepIdx);
+    // Field mode: score via Dario field only (no learned weights)
+    logits = new Float32Array(NWORDS);
     vocab = [];
     for (let i = 0; i < NWORDS; i++)
       vocab.push({ word: WORDS[i], bpeIds: vocabBpe[i], fromHardcoded: true, origIdx: i });
@@ -891,16 +932,11 @@ function selectWord(bpeContext, wordContext, prevWord, stepIdx, forbidden, direc
   darioOverlay(logits, wordContext, prevWord, stepIdx, direction, vocab);
 
   // Build candidates, applying forbidden filter
-  // forbidden is a Set of WORDS[] indices — for extVocab entries with origIdx >= 0,
-  // check origIdx; for BPE-derived words (origIdx=-1), check word string against
-  // forbidden words set (built lazily)
   let forbiddenWords = null;
   const indexed = [];
   for (let i = 0; i < vocab.length; i++) {
     const entry = vocab[i];
-    // Check forbidden by origIdx for hardcoded words
     if (entry.origIdx >= 0 && forbidden.has(entry.origIdx)) continue;
-    // Check forbidden by word string for BPE-derived words
     if (entry.origIdx < 0) {
       if (!forbiddenWords) {
         forbiddenWords = new Set();
@@ -929,7 +965,7 @@ function selectWord(bpeContext, wordContext, prevWord, stepIdx, forbidden, direc
   return top[0];
 }
 
-// ═══ ORIGIN EXTRACTION (nanojanus-specific: find most "charged" word) ═══
+// === ORIGIN EXTRACTION (find most "charged" word from prompt) ===
 
 function extractKey(text) {
   const ids = tokenizeWords(text);
@@ -943,26 +979,23 @@ function extractKey(text) {
   return best;
 }
 
-// ═══ HELPER — get BPE ids for a selected word ═══
+// === HELPER -- get BPE ids for a selected word ===
 function getSelBpeIds(sel) {
-  // Hardcoded word: look up vocabBpe by idx
   if (sel.idx >= 0 && sel.idx < NWORDS) return vocabBpe[sel.idx];
-  // Extended vocab word: look up extVocab by extIdx
   if (sel.extIdx !== undefined && sel.extIdx >= 0 && sel.extIdx < extVocab.length)
     return extVocab[sel.extIdx].bpeIds;
-  // Fallback: BPE encode the word string
   return bpeEncode(sel.word);
 }
 
-// ═══ BI-DIRECTIONAL REASONING ═══
+// ===================================================================
+// BI-DIRECTIONAL REASONING
+// ===================================================================
 
 async function runChain(userText) {
   const column = document.getElementById('column');
   column.innerHTML = '';
 
-  // BPE encode user input for forward step context
   const inputBpe = bpeEncode(userText);
-  // Word-level tokenize for Dario overlay / co-occurrence
   const wordContext = tokenizeWords(userText);
   const seedIdx = extractKey(userText);
   const seedWord = WORDS[seedIdx] || 'void';
@@ -982,8 +1015,8 @@ async function runChain(userText) {
   forbidden.add(seedIdx);
   const allSteps = [];
 
-  // Show origin FIRST — everything grows outward from here
-  const originEl = makeWordEl(`\u25cf ${seedWord} \u25cf`, 'origin', '', 0, false);
+  // Show origin
+  const originEl = makeWordEl('\u25cf ' + seedWord + ' \u25cf', 'origin', '', 0, false);
   column.appendChild(originEl);
   await sleep(600);
 
@@ -999,16 +1032,15 @@ async function runChain(userText) {
   const maxSteps = Math.max(nForward, nBackward);
 
   for (let i = 0; i < maxSteps; i++) {
-    // Generate BACKWARD word (prepend above origin — grows upward)
+    // Generate BACKWARD word (prepend above origin)
     if (i < nBackward) {
       updateChambers(nForward + i);
       const sel = selectWord(bwdBpeCtx, bwdWordCtx, bwdPrev, nForward + i, forbidden, -1);
       allSteps.push(sel);
 
-      const el = makeWordEl(sel.word, 'backward', `\u2191${nForward+i}`, prophecyDebt, false);
-      column.insertBefore(el, column.firstChild); // push to top
+      const el = makeWordEl(sel.word, 'backward', '\u2191' + (nForward+i), prophecyDebt, false);
+      column.insertBefore(el, column.firstChild);
 
-      // Get BPE ids: from vocabBpe if hardcoded word, from extVocab if extended
       const wb = getSelBpeIds(sel);
       if (wb) for (const t of wb) bwdBpeCtx.push(t);
       if (sel.idx >= 0) bwdWordCtx.push(sel.idx);
@@ -1017,7 +1049,7 @@ async function runChain(userText) {
       bwdPrev = sel.idx >= 0 ? sel.idx : -1;
     }
 
-    // Generate FORWARD word (append below origin — grows downward)
+    // Generate FORWARD word (append below origin)
     if (i < nForward) {
       updateChambers(i);
       let isWormhole = false;
@@ -1027,8 +1059,8 @@ async function runChain(userText) {
       const sel = selectWord(fwdBpeCtx, fwdWordCtx, fwdPrev, i, forbidden, 1);
       allSteps.push(sel);
 
-      const el = makeWordEl(sel.word, 'forward', `\u2193${i}`, prophecyDebt, isWormhole);
-      column.appendChild(el); // append to bottom
+      const el = makeWordEl(sel.word, 'forward', '\u2193' + i, prophecyDebt, isWormhole);
+      column.appendChild(el);
 
       const wb = getSelBpeIds(sel);
       if (wb) for (const t of wb) fwdBpeCtx.push(t);
@@ -1043,7 +1075,6 @@ async function runChain(userText) {
       fwdPrev = sel.idx >= 0 ? sel.idx : -1;
     }
 
-    // Both directions appear at the same tick
     await sleep(700);
   }
 
@@ -1056,16 +1087,16 @@ async function runChain(userText) {
   updateMetrics();
 }
 
-// ═══ DISPLAY ═══
+// === DISPLAY ===
 
 function makeWordEl(word, cls, label, debt, isWormhole) {
   const div = document.createElement('div');
-  div.className = `word-line ${cls}${isWormhole ? ' wormhole' : ''}`;
+  div.className = 'word-line ' + cls + (isWormhole ? ' wormhole' : '');
   let html = '';
-  if (label) html += `<span class="step-num">${label}</span>`;
+  if (label) html += '<span class="step-num">' + label + '</span>';
   html += word;
-  if (debt > 0) html += `<span class="step-debt">debt=${debt.toFixed(2)}</span>`;
-  if (isWormhole) html += `<span class="step-debt"> \u2295WH</span>`;
+  if (debt > 0) html += '<span class="step-debt">debt=' + debt.toFixed(2) + '</span>';
+  if (isWormhole) html += '<span class="step-debt"> \u2295WH</span>';
   div.innerHTML = html;
   return div;
 }
@@ -1077,70 +1108,75 @@ function updateMetrics() {
   const drift = calendarCumulativeDrift(days).toFixed(2);
   const diss = calendarDissonance(days).toFixed(3);
   const pd = personalDissonance().toFixed(3);
-  const blend = getBlendAlpha().toFixed(3);
-  const wMode = hasWeights ? 'TRAINED' : 'dario';
+  const trained = model !== null;
+  const wMode = trained ? 'resonance' : 'field';
   const extN = extVocab.length;
   document.getElementById('metrics').textContent =
-    `drift=${drift}  diss=${diss}  personal=${pd}  blend=${blend}  ` +
-    `debt=${prophecyDebt.toFixed(3)}  prophecy_acc=${META.prophecyAccuracy.toFixed(3)}  ` +
-    `bpe=${BPE_VOCAB}  words=${NWORDS}  ext=${extN}  mode=${wMode}`;
+    'drift=' + drift + '  diss=' + diss + '  personal=' + pd +
+    '  debt=' + prophecyDebt.toFixed(3) + '  prophecy_acc=' + META.prophecyAccuracy.toFixed(3) +
+    '  bpe=' + BPE_VOCAB + '  words=' + NWORDS + '  ext=' + extN +
+    '  layers=' + N_LAYERS + '  mode=' + wMode;
 }
 
-// ═══ WEIGHT LOADING — sets hasWeights=true when trained weights are available ═══
-// Expects an ArrayBuffer of float32 values laid out as:
-//   embed_in_A[BPE_VOCAB*DIM] + embed_in_B[BPE_VOCAB*DIM] +
-//   embed_out_A[NWORDS*DIM] + embed_out_B[NWORDS*DIM] +
-//   for each step s in 0..STEPS-1:
-//     stepWrA[s][DIM*DIM] + stepWrB[s][DIM*DIM] +
-//     stepRmsA[s][DIM] + stepRmsB[s][DIM] +
-//     stepGateA[s][HDIM*DIM] + stepUpA[s][HDIM*DIM] + stepDownA[s][DIM*HDIM] +
-//     stepGateB[s][HDIM*DIM] + stepUpB[s][HDIM*DIM] + stepDownB[s][DIM*HDIM]
-
-async function loadWeights(url) {
+// === ASYNC VOCABULARY LOADING ===
+async function loadVocabulary() {
   try {
-    const resp = await fetch(url);
+    const resp = await fetch('nanojanus.txt');
     if (!resp.ok) throw new Error('fetch failed: ' + resp.status);
-    const buf = await resp.arrayBuffer();
-    const f32 = new Float32Array(buf);
-    let off = 0;
-
-    function readSlice(len) {
-      const slice = f32.subarray(off, off + len);
-      off += len;
-      return slice;
-    }
-
-    embed_in_A = new Float32Array(readSlice(BPE_VOCAB * DIM));
-    embed_in_B = new Float32Array(readSlice(BPE_VOCAB * DIM));
-    embed_out_A = new Float32Array(readSlice(NWORDS * DIM));
-    embed_out_B = new Float32Array(readSlice(NWORDS * DIM));
-
-    for (let s = 0; s < STEPS; s++) {
-      stepWrA[s] = new Float32Array(readSlice(DIM * DIM));
-      stepWrB[s] = new Float32Array(readSlice(DIM * DIM));
-      stepRmsA[s] = new Float32Array(readSlice(DIM));
-      stepRmsB[s] = new Float32Array(readSlice(DIM));
-      stepGateA[s] = new Float32Array(readSlice(HDIM * DIM));
-      stepUpA[s] = new Float32Array(readSlice(HDIM * DIM));
-      stepDownA[s] = new Float32Array(readSlice(DIM * HDIM));
-      stepGateB[s] = new Float32Array(readSlice(HDIM * DIM));
-      stepUpB[s] = new Float32Array(readSlice(HDIM * DIM));
-      stepDownB[s] = new Float32Array(readSlice(DIM * HDIM));
-    }
-
-    hasWeights = true;
-    buildExtendedVocab(); // rebuild in case vocab changed
-    console.log('[nanojanus] weights loaded: ' + f32.length + ' floats from ' + url + ', hasWeights=true');
-    updateMetrics();
+    const text = await resp.text();
+    const lines = text.split('\n').map(l => l.trim()).filter(l => l.length > 0);
+    WORDS.length = 0;
+    for (const l of lines) WORDS.push(l);
   } catch(e) {
-    console.error('[nanojanus] weight loading failed: ' + e.message);
-    hasWeights = false;
+    document.getElementById('column').innerHTML =
+      '<div style="color:#ff6b4a;font-size:16px;text-align:center;padding:40px">' +
+      'nanojanus.txt not found.<br>Serve with a local HTTP server.</div>';
+    console.error('[nanojanus] ' + e.message);
+    return;
   }
+  NWORDS = WORDS.length;
+  initVocabBpe();
+  buildBpeStrs();
+  buildExtendedVocab();
+  updateMetrics();
+  console.log('[nanojanus] ready: ' + NWORDS + ' words, BPE vocab ' + BPE_VOCAB +
+    ', ' + BPE_MERGES + ' merges, Resonance engine ' + N_LAYERS + ' layers');
 }
+loadVocabulary();
 
-// Training is done via nanojanus.py (CLI). No in-browser training.
+// === WEIGHT LOADING UI ===
+const weightFileInput = document.getElementById('weight-file');
+const loadWeightsBtn = document.getElementById('load-weights-btn');
+const modeIndicator = document.getElementById('mode-indicator');
 
-// ═══ EVENT HANDLERS ═══
+loadWeightsBtn.addEventListener('click', () => {
+  weightFileInput.click();
+});
+
+weightFileInput.addEventListener('change', async (e) => {
+  const file = e.target.files[0];
+  if (!file) return;
+  loadWeightsBtn.textContent = 'loading...';
+  loadWeightsBtn.disabled = true;
+  try {
+    const buffer = await file.arrayBuffer();
+    model = await loadWeightsPEN7(buffer);
+    modeIndicator.textContent = 'resonance';
+    modeIndicator.classList.add('trained');
+    loadWeightsBtn.textContent = 'weights loaded';
+    loadWeightsBtn.style.color = '#4a9eff';
+    loadWeightsBtn.style.borderColor = '#4a9eff';
+    updateMetrics();
+  } catch (err) {
+    console.error('Weight load error:', err);
+    loadWeightsBtn.textContent = 'error: ' + err.message;
+    loadWeightsBtn.style.color = '#ff6b4a';
+    loadWeightsBtn.disabled = false;
+    model = null;
+  }
+});
+
+// === EVENT HANDLERS ===
 const inputEl = document.getElementById('prompt');
 const sendBtn = document.getElementById('send');
 

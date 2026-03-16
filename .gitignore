@@ -4,5 +4,6 @@ janus-hybrid
 janus-bpe
 metajanus
 *.bin
+!weights/*.bin
 *.o
 *.weights.pkl

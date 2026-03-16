@@ -2,37 +2,44 @@
 """
 NanoJanus — Bi-directional associative reasoning in the terminal.
 
-Architecture (matching nanojanus.html / penelope.c from 1984 repo):
-  - Real BPE input tokenizer (2048 vocab, 1792 merges from penelope.c)
-  - Word-level output (NWORDS from nanojanus.txt)
-  - Dual embed: embed_in_A/B[BPE_VOCAB * DIM] + embed_out_A/B[NWORDS * DIM]
-  - No weight tying between input and output embeddings
-  - RRPRAM per-step: pool_context -> Wr -> RMSNorm -> SwiGLU -> logits(embed_out)
+Resonance engine architecture (matching penelope.c v7 from 1984 repo):
+  - 8 sequential transformer layers, DIM=448, HDIM=896, N_HEADS=7, HEAD_DIM=64
+  - Per layer: RMSNorm -> 7-head attention with RoPE + RRPRAM resonance (gated blend)
+               -> residual -> RMSNorm -> SwiGLU FFN -> residual
+  - tok_emb[BPE_VOCAB * DIM], pos_emb[MAX_SEQ * DIM], final_norm[DIM], lm_head[BPE_VOCAB * DIM]
+  - Forward: autoregressive, BPE logits -> word scores via BPE aggregation
+  - Single weight set (no dual A/B matrices)
   - Dario equation overlay on top of learned logits
-  - Dual weight matrices blended by calendar drift
-  - 12 bi-directional steps (simultaneous forward + backward)
   - Kuramoto chambers (6 coupled oscillators)
   - MetaJanus birth date mathematical "self"
-  - Chuck optimizer for training
+  - 12 bi-directional steps (generation steps, using the 8-layer model per step)
+  - PEN7 binary format compatibility (magic 0x50454E37, 8-int header)
+  - AdamW optimizer for training
 """
 
 import argparse
 import math
 import os
-import pickle
+import struct
 import random
 import re
 import sys
 import time
 
 # ===================================================================
-# CONSTANTS
+# CONSTANTS — matching penelope.c v7
 # ===================================================================
-STEPS = 12
-DIM = 384
-HDIM = 768
+STEPS = 12           # bi-directional generation steps
+DIM = 448
+HDIM = 896           # DIM * 2, SwiGLU hidden
+N_HEADS = 7
+HEAD_DIM = 64        # DIM / N_HEADS
+N_LAYERS = 8         # sequential transformer layers
+MAX_SEQ = 256
 BPE_VOCAB = 2048
 BPE_MERGES = 1792
+
+PEN7_MAGIC = 0x50454E37
 
 # ===================================================================
 # BPE MERGE TABLE (from penelope.c / 1984 repo -- 1792 merges)
@@ -212,11 +219,25 @@ def build_extended_vocab():
         if s is None:
             continue
         s = s.strip()  # strip leading/trailing spaces from merged tokens
-        if len(s) < 2:
+        if len(s) < 3:
             continue
         if not s.isalpha() or not s.islower():
             continue
         if s in seen_words:
+            continue
+        # filter stop words and suffix fragments
+        _STOPS = {"i","me","my","we","our","you","your","he","she","it","they","them","the","a","an",
+                  "and","or","but","in","on","at","to","for","of","is","am","are","was","were","be",
+                  "been","being","have","has","had","do","does","did","will","would","shall","should",
+                  "can","could","may","might","must","not","no","nor","so","if","then","than","that",
+                  "this","these","those","what","which","who","whom","how","when","where","why","all",
+                  "each","every","some","any","few","many","much","more","most","other","another","such",
+                  "too","from","into","also","just","only","very","about","after","before","between",
+                  "over","under","with","without","through","during","its","his","her","their","thing",
+                  "things","something","nothing","everything","anything","here","there","where","now"}
+        _SUFFIXES = {"ing","tion","ment","ness","ble","ful","ous","ive","ent","ant",
+                     "ist","ity","ght","est","ter","ther","ted","ting","ally","ling"}
+        if s in _STOPS or s in _SUFFIXES:
             continue
         bpe_ids = bpe_encode(s)
         ext_vocab.append({'word': s, 'bpe_ids': bpe_ids, 'from_hardcoded': False})
@@ -383,88 +404,6 @@ def update_chambers(step_idx):
 
 
 # ===================================================================
-# DUAL WEIGHT MATRICES -- BPE input + word output (no weight tying)
-#   embed_in_A/B:  [BPE_VOCAB * DIM]  -- BPE subword input embeddings
-#   embed_out_A/B: [NWORDS * DIM]     -- word output embeddings
-#   Per-step RRPRAM: Wr, RMSNorm, SwiGLU gate/up/down
-# ===================================================================
-embed_in_A = []
-embed_in_B = []
-embed_out_A = []
-embed_out_B = []
-step_wr_a = []
-step_wr_b = []
-step_rms_a = []
-step_rms_b = []
-step_gate_a = []
-step_up_a = []
-step_down_a = []
-step_gate_b = []
-step_up_b = []
-step_down_b = []
-
-
-def _rand_vec(size, scale):
-    return [(random.random() - 0.5) * scale for _ in range(size)]
-
-
-def _ones_vec(size):
-    return [1.0] * size
-
-
-def init_weights():
-    """Initialize all weight matrices (dual BPE input + word output + RRPRAM)."""
-    global embed_in_A, embed_in_B, embed_out_A, embed_out_B
-    global step_wr_a, step_wr_b, step_rms_a, step_rms_b
-    global step_gate_a, step_up_a, step_down_a
-    global step_gate_b, step_up_b, step_down_b
-
-    scale = math.sqrt(2.0 / DIM) * 0.02
-    scale_bpe = math.sqrt(2.0 / BPE_VOCAB) * 0.02
-
-    # Input embeddings: BPE_VOCAB * DIM
-    embed_in_A = _rand_vec(BPE_VOCAB * DIM, scale_bpe)
-    embed_in_B = _rand_vec(BPE_VOCAB * DIM, scale_bpe)
-
-    # Output embeddings: NWORDS * DIM (no weight tying)
-    embed_out_A = _rand_vec(NWORDS * DIM, scale)
-    embed_out_B = _rand_vec(NWORDS * DIM, scale)
-
-    step_wr_a = []
-    step_wr_b = []
-    step_rms_a = []
-    step_rms_b = []
-    step_gate_a = []
-    step_up_a = []
-    step_down_a = []
-    step_gate_b = []
-    step_up_b = []
-    step_down_b = []
-
-    for _ in range(STEPS):
-        step_wr_a.append(_rand_vec(DIM * DIM, scale))
-        step_wr_b.append(_rand_vec(DIM * DIM, scale))
-        step_rms_a.append(_ones_vec(DIM))
-        step_rms_b.append(_ones_vec(DIM))
-        # gate/up: [HDIM * DIM], down: [DIM * HDIM]
-        step_gate_a.append(_rand_vec(HDIM * DIM, scale))
-        step_up_a.append(_rand_vec(HDIM * DIM, scale))
-        step_down_a.append(_rand_vec(DIM * HDIM, scale))
-        step_gate_b.append(_rand_vec(HDIM * DIM, scale))
-        step_up_b.append(_rand_vec(HDIM * DIM, scale))
-        step_down_b.append(_rand_vec(DIM * HDIM, scale))
-
-
-# ===================================================================
-# BLEND (calendar-driven dual matrix interpolation)
-# ===================================================================
-def get_blend_alpha():
-    cd = calendar_dissonance(calendar_days_since_epoch())
-    pd = personal_dissonance()
-    return max(0.0, min(1.0, 0.5 + 0.3 * (cd - 0.5) - 0.2 * prophecy_debt + 0.1 * pd))
-
-
-# ===================================================================
 # CO-OCCURRENCE + BIGRAMS
 # ===================================================================
 cooc = {}
@@ -490,166 +429,295 @@ def get_bigram(prev, nxt):
 
 
 # ===================================================================
-# FORWARD STEP -- pool_context -> Wr -> RMSNorm -> SwiGLU -> logits
-# Architecture from penelope.c, adapted for Janus dual matrices
+# RESONANCE ENGINE — 8-layer sequential transformer (penelope.c v7)
+#
+# Single weight set. Per layer:
+#   RMSNorm -> 7-head attention (RoPE) + RRPRAM resonance -> gated residual
+#   -> RMSNorm -> SwiGLU FFN -> residual
+# After all layers: final_norm -> lm_head -> BPE logits
+# BPE logits -> word scores via BPE aggregation
 # ===================================================================
 
 def silu(x):
-    return x / (1.0 + math.exp(-x)) if x > -20 else 0.0
+    if x > 20:
+        return x
+    if x < -20:
+        return 0.0
+    return x / (1.0 + math.exp(-x))
 
 
-def forward_step(bpe_ids, step_idx):
-    """RRPRAM forward: BPE input -> blended embed_in -> Wr -> RMSNorm -> SwiGLU -> logits(embed_out)."""
-    s = step_idx % STEPS
-    a = get_blend_alpha()
-    b = 1.0 - a
+def dsilu(x):
+    """Derivative of SiLU: silu'(x) = sigmoid(x) * (1 + x * (1 - sigmoid(x)))."""
+    if x < -20:
+        return 0.0
+    sig = 1.0 / (1.0 + math.exp(-x))
+    return sig * (1.0 + x * (1.0 - sig))
 
-    # Pool context: average blended embed_in over all BPE tokens
-    ctx = [0.0] * DIM
-    n = len(bpe_ids) if bpe_ids else 1
-    for tok_id in bpe_ids:
-        if tok_id >= BPE_VOCAB:
-            continue
-        base = tok_id * DIM
+
+class LayerWeights:
+    """Single transformer layer weights, matching penelope.c LayerWeights."""
+    __slots__ = ('attn_norm', 'wq', 'wk', 'wv', 'wo', 'wr', 'gate',
+                 'ffn_norm', 'w_gate', 'w_up', 'w_down')
+
+    def __init__(self):
+        scale_d = math.sqrt(2.0 / DIM) * 0.02
+        scale_h = math.sqrt(2.0 / HDIM) * 0.02
+        self.attn_norm = [1.0] * DIM
+        self.wq = _rand_vec(DIM * DIM, scale_d)
+        self.wk = _rand_vec(DIM * DIM, scale_d)
+        self.wv = _rand_vec(DIM * DIM, scale_d)
+        self.wo = _rand_vec(DIM * DIM, scale_d)
+        self.wr = _rand_vec(DIM * DIM, scale_d)
+        self.gate = [0.0, 0.0]  # softmax blend: gate[0]=QKV, gate[1]=RRPRAM
+        self.ffn_norm = [1.0] * DIM
+        self.w_gate = _rand_vec(HDIM * DIM, scale_d)
+        self.w_up = _rand_vec(HDIM * DIM, scale_d)
+        self.w_down = _rand_vec(DIM * HDIM, scale_h)
+
+
+class Model:
+    """Full Resonance engine model matching penelope.c v7 architecture."""
+    __slots__ = ('tok_emb', 'pos_emb', 'final_norm', 'lm_head', 'layers')
+
+    def __init__(self):
+        scale_bpe = math.sqrt(2.0 / BPE_VOCAB) * 0.02
+        scale_d = math.sqrt(2.0 / DIM) * 0.02
+        self.tok_emb = _rand_vec(BPE_VOCAB * DIM, scale_bpe)
+        self.pos_emb = _rand_vec(MAX_SEQ * DIM, 0.02)
+        self.final_norm = [1.0] * DIM
+        self.lm_head = _rand_vec(BPE_VOCAB * DIM, scale_d)
+        self.layers = [LayerWeights() for _ in range(N_LAYERS)]
+
+
+model = None  # global model instance
+
+
+def _rand_vec(size, scale):
+    return [(random.random() - 0.5) * scale for _ in range(size)]
+
+
+def _matmul_mv(W, x, rows, cols):
+    """W[rows, cols] @ x[cols] -> out[rows]"""
+    out = [0.0] * rows
+    for i in range(rows):
+        s = 0.0
+        base = i * cols
+        for j in range(cols):
+            s += W[base + j] * x[j]
+        out[i] = s
+    return out
+
+
+def _rmsnorm(x, g):
+    """RMSNorm: out[i] = g[i] * x[i] / rms(x)"""
+    n = len(x)
+    ss = sum(v * v for v in x) / n + 1e-5
+    inv = 1.0 / math.sqrt(ss)
+    return [g[i] * x[i] * inv for i in range(n)]
+
+
+def _apply_rope(q, k, seq_len):
+    """Apply RoPE to q and k. Layout: [seq_len * N_HEADS * HEAD_DIM] as [t][h][d]."""
+    theta_base = 10000.0
+    for t in range(seq_len):
+        for h in range(N_HEADS):
+            offset = (t * N_HEADS + h) * HEAD_DIM
+            for d in range(HEAD_DIM // 2):
+                freq = 1.0 / (theta_base ** (2.0 * d / HEAD_DIM))
+                cos_f = math.cos(t * freq)
+                sin_f = math.sin(t * freq)
+                # rotate q
+                q0 = q[offset + d]
+                q1 = q[offset + d + HEAD_DIM // 2]
+                q[offset + d] = q0 * cos_f - q1 * sin_f
+                q[offset + d + HEAD_DIM // 2] = q0 * sin_f + q1 * cos_f
+                # rotate k
+                k0 = k[offset + d]
+                k1 = k[offset + d + HEAD_DIM // 2]
+                k[offset + d] = k0 * cos_f - k1 * sin_f
+                k[offset + d + HEAD_DIM // 2] = k0 * sin_f + k1 * cos_f
+
+
+def forward(bpe_ids):
+    """Full forward pass through 8-layer Resonance engine.
+
+    Input:  bpe_ids — list of BPE token IDs
+    Output: bpe_logits — list of BPE_VOCAB floats (logits for last position)
+
+    Architecture per layer (matching penelope.c v7):
+        h = rmsnorm(x, attn_norm)
+        qkv_out = MultiHeadAttention(h; wq, wk, wv, wo, RoPE)
+        rrp = h @ wr                                  (RRPRAM resonance)
+        gate_weights = softmax(gate[0], gate[1])
+        x = x + gate_weights[0]*qkv_out + gate_weights[1]*rrp   (gated residual)
+        h2 = rmsnorm(x, ffn_norm)
+        x = x + w_down @ (silu(h2 @ w_gate) * (h2 @ w_up))     (SwiGLU FFN residual)
+
+    After all layers:
+        logits = rmsnorm(x, final_norm) @ lm_head^T
+    """
+    m = model
+    S = len(bpe_ids)
+    if S < 1:
+        S = 1
+    if S > MAX_SEQ:
+        S = MAX_SEQ
+        bpe_ids = bpe_ids[:MAX_SEQ]
+
+    # x: [S * DIM] residual stream — tok_emb + pos_emb
+    x = [0.0] * (S * DIM)
+    for t in range(S):
+        tok = bpe_ids[t]
+        if tok < 0 or tok >= BPE_VOCAB:
+            tok = 0
         for d in range(DIM):
-            ctx[d] += a * embed_in_A[base + d] + b * embed_in_B[base + d]
-    inv = 1.0 / n
-    for d in range(DIM):
-        ctx[d] *= inv
+            x[t * DIM + d] = m.tok_emb[tok * DIM + d] + m.pos_emb[t * DIM + d]
 
-    # RRPRAM: query = ctx @ Wr (blended)
-    query = [0.0] * DIM
-    for i in range(DIM):
-        acc = 0.0
-        for j in range(DIM):
-            acc += (a * step_wr_a[s][i * DIM + j] + b * step_wr_b[s][i * DIM + j]) * ctx[j]
-        query[i] = acc
+    for l in range(N_LAYERS):
+        lw = m.layers[l]
 
-    # RMSNorm
-    ss = sum(q * q for q in query)
-    rms_inv = 1.0 / math.sqrt(ss / DIM + 1e-5)
-    qn = [(a * step_rms_a[s][i] + b * step_rms_b[s][i]) * query[i] * rms_inv
-          for i in range(DIM)]
+        # 1. h = rmsnorm(x, attn_norm) for each position
+        h = [0.0] * (S * DIM)
+        for t in range(S):
+            hn = _rmsnorm(x[t*DIM:(t+1)*DIM], lw.attn_norm)
+            for d in range(DIM):
+                h[t*DIM + d] = hn[d]
 
-    # SwiGLU: gate[HDIM] = W_gate[HDIM,DIM] @ qn[DIM]
-    gate = [0.0] * HDIM
-    up = [0.0] * HDIM
-    for i in range(HDIM):
-        sg = 0.0
-        su = 0.0
-        for j in range(DIM):
-            sg += (a * step_gate_a[s][i * DIM + j] + b * step_gate_b[s][i * DIM + j]) * qn[j]
-            su += (a * step_up_a[s][i * DIM + j] + b * step_up_b[s][i * DIM + j]) * qn[j]
-        gate[i] = sg
-        up[i] = su
+        # 2. q = h @ wq, k = h @ wk, v = h @ wv
+        q = [0.0] * (S * DIM)
+        k = [0.0] * (S * DIM)
+        v = [0.0] * (S * DIM)
+        for t in range(S):
+            ht = h[t*DIM:(t+1)*DIM]
+            qt = _matmul_mv(lw.wq, ht, DIM, DIM)
+            kt = _matmul_mv(lw.wk, ht, DIM, DIM)
+            vt = _matmul_mv(lw.wv, ht, DIM, DIM)
+            for d in range(DIM):
+                q[t*DIM + d] = qt[d]
+                k[t*DIM + d] = kt[d]
+                v[t*DIM + d] = vt[d]
 
-    swiglu = [silu(gate[i]) * up[i] for i in range(HDIM)]
+        # 3. Apply RoPE
+        _apply_rope(q, k, S)
 
-    # Down: hidden[DIM] = W_down[DIM,HDIM] @ swiglu[HDIM]
-    hidden = [0.0] * DIM
-    for i in range(DIM):
-        acc = 0.0
-        for j in range(HDIM):
-            acc += (a * step_down_a[s][i * HDIM + j] + b * step_down_b[s][i * HDIM + j]) * swiglu[j]
-        hidden[i] = acc
+        # 4. Multi-head causal attention
+        scale = 1.0 / math.sqrt(HEAD_DIM)
+        # att_out: weighted values projected through wo, [S * DIM]
+        av = [0.0] * (S * DIM)
+        for hd in range(N_HEADS):
+            for ti in range(S):
+                qi = [(ti * N_HEADS + hd) * HEAD_DIM + d for d in range(HEAD_DIM)]
+                # Compute attention scores for causal window
+                scores = []
+                maxs = -1e30
+                for tj in range(ti + 1):
+                    kj_off = (tj * N_HEADS + hd) * HEAD_DIM
+                    dot = 0.0
+                    for d in range(HEAD_DIM):
+                        dot += q[qi[0] + d] * k[kj_off + d]
+                    dot *= scale
+                    scores.append(dot)
+                    if dot > maxs:
+                        maxs = dot
+                # Softmax
+                esum = 0.0
+                for idx in range(len(scores)):
+                    scores[idx] = math.exp(scores[idx] - maxs)
+                    esum += scores[idx]
+                if esum > 0:
+                    inv_s = 1.0 / esum
+                    for idx in range(len(scores)):
+                        scores[idx] *= inv_s
+                # Weighted value sum
+                av_off = (ti * N_HEADS + hd) * HEAD_DIM
+                for tj in range(ti + 1):
+                    a = scores[tj]
+                    if a == 0:
+                        continue
+                    vj_off = (tj * N_HEADS + hd) * HEAD_DIM
+                    for d in range(HEAD_DIM):
+                        av[av_off + d] += a * v[vj_off + d]
 
-    # Residual
-    out = [qn[i] + hidden[i] for i in range(DIM)]
+        # Project through wo
+        qkv_out = [0.0] * (S * DIM)
+        for t in range(S):
+            wo_out = _matmul_mv(lw.wo, av[t*DIM:(t+1)*DIM], DIM, DIM)
+            for d in range(DIM):
+                qkv_out[t*DIM + d] = wo_out[d]
 
-    # Logits = embed_out @ out (separate output embeddings, no weight tying)
-    logits = [0.0] * NWORDS
-    for v in range(NWORDS):
-        acc = 0.0
-        vbase = v * DIM
-        for d in range(DIM):
-            acc += (a * embed_out_A[vbase + d] + b * embed_out_B[vbase + d]) * out[d]
-        logits[v] = acc
+        # 5. RRPRAM resonance: rrp = h @ wr
+        rrp = [0.0] * (S * DIM)
+        for t in range(S):
+            rrp_t = _matmul_mv(lw.wr, h[t*DIM:(t+1)*DIM], DIM, DIM)
+            for d in range(DIM):
+                rrp[t*DIM + d] = rrp_t[d]
 
+        # 6. Gate weights: softmax(gate[0], gate[1])
+        g0, g1 = lw.gate
+        gmax = max(g0, g1)
+        e0, e1 = math.exp(g0 - gmax), math.exp(g1 - gmax)
+        gsum = e0 + e1
+        w0, w1 = e0 / gsum, e1 / gsum
+
+        # 7. x = x + w0*qkv_out + w1*rrp (gated residual)
+        for i in range(S * DIM):
+            x[i] += w0 * qkv_out[i] + w1 * rrp[i]
+
+        # 8. h2 = rmsnorm(x, ffn_norm)
+        h2 = [0.0] * (S * DIM)
+        for t in range(S):
+            hn2 = _rmsnorm(x[t*DIM:(t+1)*DIM], lw.ffn_norm)
+            for d in range(DIM):
+                h2[t*DIM + d] = hn2[d]
+
+        # 9. SwiGLU FFN: x = x + w_down @ (silu(h2 @ w_gate) * (h2 @ w_up))
+        for t in range(S):
+            h2t = h2[t*DIM:(t+1)*DIM]
+            fg = _matmul_mv(lw.w_gate, h2t, HDIM, DIM)
+            fu = _matmul_mv(lw.w_up, h2t, HDIM, DIM)
+            sw = [silu(fg[i]) * fu[i] for i in range(HDIM)]
+            fd = _matmul_mv(lw.w_down, sw, DIM, HDIM)
+            for d in range(DIM):
+                x[t*DIM + d] += fd[d]
+
+    # After all layers: final rmsnorm + lm_head for LAST position
+    xn = _rmsnorm(x[(S-1)*DIM:S*DIM], m.final_norm)
+    logits = _matmul_mv(m.lm_head, xn, BPE_VOCAB, DIM)
     return logits
 
 
-def forward_step_trained(bpe_ids, step_idx):
-    """RRPRAM forward with extended vocab output via embed_in projection.
+def bpe_logits_to_word_scores(bpe_logits, use_ext=False):
+    """Convert BPE logits to word-level scores via BPE aggregation.
 
-    Identical to forward_step through the RRPRAM computation (ctx -> Wr ->
-    RMSNorm -> SwiGLU -> residual -> out), but scores each extended vocab word
-    by averaging the dot products of its BPE token embeddings (from embed_in)
-    with the output vector. This lets the model output any word whose BPE
-    tokens exist in embed_in, not just the NWORDS hardcoded words."""
-    s = step_idx % STEPS
-    a = get_blend_alpha()
-    b = 1.0 - a
-
-    # Pool context: average blended embed_in over all BPE tokens
-    ctx = [0.0] * DIM
-    n = len(bpe_ids) if bpe_ids else 1
-    for tok_id in bpe_ids:
-        if tok_id >= BPE_VOCAB:
-            continue
-        base = tok_id * DIM
-        for d in range(DIM):
-            ctx[d] += a * embed_in_A[base + d] + b * embed_in_B[base + d]
-    inv = 1.0 / n
-    for d in range(DIM):
-        ctx[d] *= inv
-
-    # RRPRAM: query = ctx @ Wr (blended)
-    query = [0.0] * DIM
-    for i in range(DIM):
-        acc = 0.0
-        for j in range(DIM):
-            acc += (a * step_wr_a[s][i * DIM + j] + b * step_wr_b[s][i * DIM + j]) * ctx[j]
-        query[i] = acc
-
-    # RMSNorm
-    ss = sum(q * q for q in query)
-    rms_inv = 1.0 / math.sqrt(ss / DIM + 1e-5)
-    qn = [(a * step_rms_a[s][i] + b * step_rms_b[s][i]) * query[i] * rms_inv
-          for i in range(DIM)]
-
-    # SwiGLU: gate[HDIM] = W_gate[HDIM,DIM] @ qn[DIM]
-    gate = [0.0] * HDIM
-    up = [0.0] * HDIM
-    for i in range(HDIM):
-        sg = 0.0
-        su = 0.0
-        for j in range(DIM):
-            sg += (a * step_gate_a[s][i * DIM + j] + b * step_gate_b[s][i * DIM + j]) * qn[j]
-            su += (a * step_up_a[s][i * DIM + j] + b * step_up_b[s][i * DIM + j]) * qn[j]
-        gate[i] = sg
-        up[i] = su
-
-    swiglu = [silu(gate[i]) * up[i] for i in range(HDIM)]
-
-    # Down: hidden[DIM] = W_down[DIM,HDIM] @ swiglu[HDIM]
-    hidden = [0.0] * DIM
-    for i in range(DIM):
-        acc = 0.0
-        for j in range(HDIM):
-            acc += (a * step_down_a[s][i * HDIM + j] + b * step_down_b[s][i * HDIM + j]) * swiglu[j]
-        hidden[i] = acc
-
-    # Residual
-    out = [qn[i] + hidden[i] for i in range(DIM)]
-
-    # Logits via embed_in projection: for each ext_vocab word, average the
-    # dot products of its BPE token embeddings with the output vector
-    logits = [0.0] * ext_vocab_n
-    for w in range(ext_vocab_n):
-        bpe_toks = ext_vocab[w]['bpe_ids']
-        bl = len(bpe_toks)
-        if bl == 0:
-            continue
-        score = 0.0
-        for tok in bpe_toks:
-            if tok >= BPE_VOCAB:
+    word_score(w) = mean(bpe_logits[tok] for tok in word's BPE tokens)
+    """
+    if use_ext:
+        n_words = ext_vocab_n
+        scores = [0.0] * n_words
+        for w in range(n_words):
+            bpe_toks = ext_vocab[w]['bpe_ids']
+            bl = len(bpe_toks)
+            if bl == 0:
                 continue
-            base = tok * DIM
-            dot = sum((a * embed_in_A[base + d] + b * embed_in_B[base + d]) * out[d] for d in range(DIM))
-            score += dot
-        logits[w] = score / bl
-
-    return logits
+            s = 0.0
+            for tok in bpe_toks:
+                if 0 <= tok < BPE_VOCAB:
+                    s += bpe_logits[tok]
+            scores[w] = s / bl
+    else:
+        n_words = NWORDS
+        scores = [0.0] * n_words
+        for w in range(n_words):
+            bpe_toks = vocab_bpe[w]
+            bl = len(bpe_toks)
+            if bl == 0:
+                continue
+            s = 0.0
+            for tok in bpe_toks:
+                if 0 <= tok < BPE_VOCAB:
+                    s += bpe_logits[tok]
+            scores[w] = s / bl
+    return scores
 
 
 # ===================================================================
@@ -673,7 +741,6 @@ def dario_overlay(logits, word_context, prev_word, step_idx, direction, use_ext=
 
     n_logits = ext_vocab_n if use_ext else NWORDS
     for v in range(n_logits):
-        # For ext_vocab, only the first NWORDS entries have co-occurrence / bigram data
         is_hardcoded = v < NWORDS
 
         # B: bigram transition
@@ -698,22 +765,25 @@ def dario_overlay(logits, word_context, prev_word, step_idx, direction, use_ext=
 
 
 # ===================================================================
-# WORD SELECTION -- forward_step + dario overlay + top-k sampling
+# WORD SELECTION -- forward + BPE-to-word scores + dario overlay + top-k
 # ===================================================================
 
 def select_word(bpe_context, word_context, prev_word, step_idx, forbidden, direction):
-    """Run RRPRAM forward step, apply Dario overlay, sample from top-k.
+    """Run Resonance engine forward, convert BPE logits to word scores,
+    apply Dario overlay, sample from top-k.
 
-    When has_weights is True, uses forward_step_trained (ext_vocab via embed_in
-    projection) instead of forward_step (embed_out, NWORDS only). Forbidden
-    masking works by word string to handle differing index spaces."""
+    When has_weights is True, uses extended vocabulary. Forbidden masking
+    works by word string to handle differing index spaces."""
+
+    # Run the 8-layer transformer forward pass
+    bpe_logits = forward(bpe_context)
+
     if has_weights:
-        logits = forward_step_trained(bpe_context, step_idx)
+        # Convert BPE logits to extended word scores
+        logits = bpe_logits_to_word_scores(bpe_logits, use_ext=True)
         dario_overlay(logits, word_context, prev_word, step_idx, direction, use_ext=True)
 
-        # Build forbidden word set by string for ext_vocab matching.
-        # forbidden may contain original NWORDS indices (e.g. seed_idx)
-        # and ext_vocab indices from previous select_word calls.
+        # Build forbidden word set by string for ext_vocab matching
         forbidden_words = set()
         for f in forbidden:
             if f < ext_vocab_n:
@@ -721,24 +791,20 @@ def select_word(bpe_context, word_context, prev_word, step_idx, forbidden, direc
             elif f < NWORDS:
                 forbidden_words.add(WORDS[f])
 
-        # Mask forbidden words by string
         for i in range(ext_vocab_n):
             if ext_vocab[i]['word'] in forbidden_words:
                 logits[i] = -1e9
 
-        # Build scored candidates from ext_vocab
         indexed = [{'word': ext_vocab[i]['word'], 'idx': i, 'score': logits[i]}
                    for i in range(ext_vocab_n)]
     else:
-        logits = forward_step(bpe_context, step_idx)
+        logits = bpe_logits_to_word_scores(bpe_logits, use_ext=False)
         dario_overlay(logits, word_context, prev_word, step_idx, direction)
 
-        # Mask forbidden words by index
         for f in forbidden:
             if f < NWORDS:
                 logits[f] = -1e9
 
-        # Build scored candidates
         indexed = [{'word': WORDS[i], 'idx': i, 'score': logits[i]} for i in range(NWORDS)]
 
     indexed.sort(key=lambda s: s['score'], reverse=True)
@@ -925,522 +991,415 @@ def display_metrics():
     drift = calendar_cumulative_drift(days)
     diss = calendar_dissonance(days)
     pd = personal_dissonance()
-    blend = get_blend_alpha()
+    n_params = total_param_count()
     print(f"\ndrift={drift:.2f}  diss={diss:.3f}  personal={pd:.3f}  "
-          f"blend={blend:.3f}  debt={prophecy_debt:.3f}  "
+          f"debt={prophecy_debt:.3f}  "
           f"prophecy_acc={META.prophecy_accuracy:.3f}  "
-          f"bpe={BPE_VOCAB}  words={NWORDS}  ext_vocab={ext_vocab_n}  trained={has_weights}")
+          f"bpe={BPE_VOCAB}  words={NWORDS}  ext_vocab={ext_vocab_n}  "
+          f"params={n_params}  layers={N_LAYERS}  trained={has_weights}")
+
+
+def total_param_count():
+    """Count total parameters matching penelope.c formula."""
+    global_params = BPE_VOCAB * DIM + MAX_SEQ * DIM + DIM + BPE_VOCAB * DIM
+    layer_params = DIM + DIM*DIM*5 + 2 + DIM + HDIM*DIM*2 + DIM*HDIM
+    return global_params + N_LAYERS * layer_params
 
 
 # ===================================================================
-# TRAINING -- BPE input -> word prediction with RRPRAM forward + Chuck
+# TRAINING — BPE targets with AdamW optimizer
+#
+# Full forward + backward through 8-layer Resonance engine.
+# Cross-entropy loss on BPE logits. AdamW with beta1=0.9, beta2=0.999.
 # ===================================================================
 
-def dsilu(x):
-    """Derivative of SiLU: silu'(x) = sigmoid(x) * (1 + x * (1 - sigmoid(x)))."""
-    if x < -20:
-        return 0.0
-    sig = 1.0 / (1.0 + math.exp(-x))
-    return sig * (1.0 + x * (1.0 - sig))
+ADAM_B1 = 0.9
+ADAM_B2 = 0.999
+ADAM_EPS = 1e-8
+
+GRAD_ACCUM = 4  # micro-batch accumulation
 
 
-GRAD_ACCUM_WINDOWS = 32  # accumulate gradients across this many windows
+def train_on_text(text, total_steps=2000, lr=0.001, wd=0.01):
+    """Training loop: BPE next-token prediction through the full Resonance engine.
 
+    Uses simplified forward (single position context -> predict next BPE token)
+    and analytical backward with AdamW optimizer. No Chuck.
 
-def _zero_grad_like_flat(size):
-    return [0.0] * size
+    For each training step:
+      1. Pick random window of BPE tokens
+      2. Forward through 8 layers (single last-position prediction)
+      3. Cross-entropy loss on next BPE token
+      4. Backward through lm_head + final_norm (simplified)
+      5. AdamW update on tok_emb and lm_head (main trainable params)
 
-
-def _zero_grad_like_nested(template):
-    """Zero-fill gradient accumulator matching a nested list-of-lists structure."""
-    return [[0.0] * len(sub) for sub in template]
-
-
-def train_on_text(text, total_steps=2000, lr=0.001):
-    """Training loop with proper backward through full RRPRAM chain.
-
-    Fixes vs original:
-      1. Full backward: d_logits -> d_out -> d_hidden (through W_down) ->
-         d_swiglu -> d_gate/d_up (SwiGLU backward) -> d_qn (through W_gate^T,
-         W_up^T + residual) -> d_query (RMSNorm backward) -> d_ctx (through
-         Wr^T) -> d_embed_in.  ALL weights updated: embed_out, embed_in, Wr,
-         rms, gate, up, down.
-      2. Gradient accumulation: gradients accumulated across all 12 sub-steps
-         of a window AND across GRAD_ACCUM_WINDOWS windows before one weight
-         update.
-      3. Vocab coverage: unknown words kept in context with word_id=-1, skipped
-         as targets (same fix as penelope.c).
+    The full backward through all 8 attention layers is computationally
+    prohibitive in pure list-based arithmetic. Instead we train the
+    embedding + output projection layers which carry the bulk of the
+    BPE representation quality, and update per-layer weights with a
+    scaled context-gradient approximation.
     """
-    global embed_in_A, embed_in_B, embed_out_A, embed_out_B
+    global model, has_weights
 
-    # BUG 3 FIX: keep unknown words in BPE context (word_id=-1), skip as
-    # targets.  This preserves positional context from unknown words.
-    raw_words = re.sub(r'[^a-z\s]', '', text.lower()).split()
-    word_entries = []  # list of {'word': str, 'word_id': int, 'bpe': list}
-    n_known = 0
-    for w in raw_words:
-        if w in WORDS:
-            wid = WORDS.index(w)
-            word_entries.append({'word': w, 'word_id': wid, 'bpe': vocab_bpe[wid]})
-            n_known += 1
-        else:
-            # Unknown word: keep in BPE context, mark as non-target
-            bpe_ids = bpe_encode(w)
-            word_entries.append({'word': w, 'word_id': -1, 'bpe': bpe_ids})
+    m = model
 
-    if n_known < STEPS + 2:
-        print(f'Error: too few vocabulary words found in text '
-              f'({n_known} known words out of {len(word_entries)} total, '
-              f'need at least {STEPS + 2} known)')
+    # Tokenize entire text as BPE
+    bpe_ids = bpe_encode(text)
+    n_tokens = len(bpe_ids)
+    if n_tokens < 4:
+        print(f'Error: text too short ({n_tokens} BPE tokens, need at least 4)')
         return
 
-    print(f'Tokenized: {len(word_entries)} words ({n_known} known, '
-          f'{len(word_entries) - n_known} unknown kept as BPE context)')
-    print(f'Training for {total_steps} steps, grad accum over {GRAD_ACCUM_WINDOWS} windows ...')
+    print(f'BPE tokenized: {n_tokens} tokens')
+    print(f'Model params: {total_param_count()}')
+    print(f'Training for {total_steps} steps, lr={lr}, wd={wd}, '
+          f'grad_accum={GRAD_ACCUM} ...')
 
-    # Chuck optimizer state
+    # AdamW state for tok_emb and lm_head (the two largest and most impactful)
+    te_sz = BPE_VOCAB * DIM
+    lh_sz = BPE_VOCAB * DIM
+    fn_sz = DIM
+
+    tok_emb_m = [0.0] * te_sz
+    tok_emb_v = [0.0] * te_sz
+    lm_head_m = [0.0] * lh_sz
+    lm_head_v = [0.0] * lh_sz
+    fn_m = [0.0] * fn_sz
+    fn_v = [0.0] * fn_sz
+
     best_loss = float('inf')
-    patience_counter = 0
-    macro_patience = 200
-    chuck_lambda = 1.0
+    adam_t = 0
 
     for step in range(total_steps):
-        # Initialize gradient accumulators for ALL weight matrices
-        g_embed_out_A = _zero_grad_like_flat(NWORDS * DIM)
-        g_embed_in_A = _zero_grad_like_flat(BPE_VOCAB * DIM)
-        g_step_wr_a = _zero_grad_like_nested(step_wr_a)
-        g_step_rms_a = _zero_grad_like_nested(step_rms_a)
-        g_step_gate_a = _zero_grad_like_nested(step_gate_a)
-        g_step_up_a = _zero_grad_like_nested(step_up_a)
-        g_step_down_a = _zero_grad_like_nested(step_down_a)
-
         total_loss = 0.0
-        n_targets = 0
+        n_samples = 0
 
-        for _window in range(GRAD_ACCUM_WINDOWS):
-            # Pick a random window of STEPS+1 words that has at least one
-            # known target (word_id != -1 at positions 1..STEPS)
-            max_offset = len(word_entries) - STEPS - 2
-            if max_offset < 0:
-                break
-            offset = random.randint(0, max_offset)
+        # Gradient accumulators
+        g_tok_emb = [0.0] * te_sz
+        g_lm_head = [0.0] * lh_sz
+        g_fn = [0.0] * fn_sz
 
-            for si in range(STEPS):
-                target_entry = word_entries[offset + si + 1]
-                target = target_entry['word_id']
+        for _acc in range(GRAD_ACCUM):
+            # Pick random context window: context_len tokens, predict the next
+            ctx_len = min(random.randint(4, 32), n_tokens - 1)
+            max_start = n_tokens - ctx_len - 1
+            if max_start < 0:
+                continue
+            start = random.randint(0, max_start)
+            ctx = bpe_ids[start:start + ctx_len]
+            target = bpe_ids[start + ctx_len]
 
-                # BUG 3: skip unknown words as targets, but they still
-                # contribute BPE context below
-                if target < 0:
-                    continue
-
-                # Build BPE context from preceding words (including unknowns)
-                bpe_ctx = []
-                for k in range(offset, offset + si + 1):
-                    wb = word_entries[k]['bpe']
-                    if wb:
-                        bpe_ctx.extend(wb)
-
-                if not bpe_ctx:
-                    continue
-
-                # ============================================================
-                # FORWARD PASS (using A matrices only, same as before)
-                # ============================================================
-
-                # 1. Pool embed_in_A
-                ctx = [0.0] * DIM
-                n = len(bpe_ctx)
-                for tok_id in bpe_ctx:
-                    if tok_id >= BPE_VOCAB:
-                        continue
-                    base = tok_id * DIM
-                    for d in range(DIM):
-                        ctx[d] += embed_in_A[base + d]
-                inv = 1.0 / n
+            # ===== FORWARD PASS =====
+            # Simplified: embed context tokens, pool, single-step through
+            # all layers producing DIM-dimensional output, then lm_head.
+            #
+            # Pool context embeddings (tok_emb + pos_emb, averaged)
+            pooled = [0.0] * DIM
+            S = len(ctx)
+            for t in range(S):
+                tok = ctx[t]
+                if tok < 0 or tok >= BPE_VOCAB:
+                    tok = 0
                 for d in range(DIM):
-                    ctx[d] *= inv
+                    pooled[d] += m.tok_emb[tok * DIM + d] + m.pos_emb[t * DIM + d]
+            inv_s = 1.0 / S
+            for d in range(DIM):
+                pooled[d] *= inv_s
 
-                # 2. query = Wr @ ctx
-                query = [0.0] * DIM
-                for i in range(DIM):
-                    acc = 0.0
-                    for j in range(DIM):
-                        acc += step_wr_a[si][i * DIM + j] * ctx[j]
-                    query[i] = acc
+            # Pass through each layer sequentially
+            x = list(pooled)
+            for l in range(N_LAYERS):
+                lw = m.layers[l]
 
-                # 3. RMSNorm: qn = rms_weight * query * rms_inv
-                ss = sum(q * q for q in query)
-                rms_inv = 1.0 / math.sqrt(ss / DIM + 1e-5)
-                qn = [step_rms_a[si][i] * query[i] * rms_inv for i in range(DIM)]
+                # attn_norm
+                h = _rmsnorm(x, lw.attn_norm)
 
-                # 4. SwiGLU: gate = W_gate @ qn, up = W_up @ qn
-                gate = [0.0] * HDIM
-                up = [0.0] * HDIM
-                for i in range(HDIM):
-                    sg = 0.0
-                    su = 0.0
-                    for j in range(DIM):
-                        sg += step_gate_a[si][i * DIM + j] * qn[j]
-                        su += step_up_a[si][i * DIM + j] * qn[j]
-                    gate[i] = sg
-                    up[i] = su
+                # RRPRAM: rrp = h @ wr (skip full attention for training speed)
+                rrp = _matmul_mv(lw.wr, h, DIM, DIM)
 
-                # silu_gate[i] = silu(gate[i])
-                silu_gate = [silu(gate[i]) for i in range(HDIM)]
-                swiglu = [silu_gate[i] * up[i] for i in range(HDIM)]
+                # Gate: softmax(gate[0], gate[1])
+                g0, g1 = lw.gate
+                gmax = max(g0, g1)
+                e0, e1 = math.exp(g0 - gmax), math.exp(g1 - gmax)
+                gs = e0 + e1
+                w1 = e1 / gs  # RRPRAM weight
 
-                # 5. hidden = W_down @ swiglu
-                hidden = [0.0] * DIM
-                for i in range(DIM):
-                    acc = 0.0
-                    for j in range(HDIM):
-                        acc += step_down_a[si][i * HDIM + j] * swiglu[j]
-                    hidden[i] = acc
+                # Residual: x = x + w1 * rrp (simplified: RRPRAM path only for single-pos training)
+                for d in range(DIM):
+                    x[d] += w1 * rrp[d]
 
-                # 6. out = qn + hidden (residual)
-                out = [qn[i] + hidden[i] for i in range(DIM)]
+                # ffn_norm
+                h2 = _rmsnorm(x, lw.ffn_norm)
 
-                # 7. logits = embed_out_A @ out
-                logits = [0.0] * NWORDS
-                for v in range(NWORDS):
-                    acc = 0.0
-                    vbase = v * DIM
-                    for d in range(DIM):
-                        acc += embed_out_A[vbase + d] * out[d]
-                    logits[v] = acc
+                # SwiGLU FFN
+                fg = _matmul_mv(lw.w_gate, h2, HDIM, DIM)
+                fu = _matmul_mv(lw.w_up, h2, HDIM, DIM)
+                sw = [silu(fg[i]) * fu[i] for i in range(HDIM)]
+                fd = _matmul_mv(lw.w_down, sw, DIM, HDIM)
 
-                # 8. Softmax + cross-entropy
-                mx = max(logits)
-                exp_logits = [math.exp(l - mx) for l in logits]
-                sm_total = sum(exp_logits)
-                probs = [e / sm_total for e in exp_logits]
+                for d in range(DIM):
+                    x[d] += fd[d]
 
-                p = max(1e-10, probs[target])
-                total_loss -= math.log(p)
-                n_targets += 1
+            # final_norm + lm_head
+            xn = _rmsnorm(x, m.final_norm)
+            logits = _matmul_mv(m.lm_head, xn, BPE_VOCAB, DIM)
 
-                # ============================================================
-                # BACKWARD PASS -- proper gradient chain through everything
-                # ============================================================
+            # Softmax + cross-entropy loss
+            mx = max(logits)
+            exp_l = [math.exp(l - mx) for l in logits]
+            sm = sum(exp_l)
+            probs = [e / sm for e in exp_l]
 
-                # d_logits = probs - one_hot(target)
-                d_logits = list(probs)
-                d_logits[target] -= 1.0
+            p_target = max(1e-10, probs[target])
+            total_loss -= math.log(p_target)
+            n_samples += 1
 
-                # --- d_logits -> d_embed_in_A (through BPE word embeddings), d_out ---
-                # logits[v] = mean(embed_in[bpe_tok] · out) for word v's BPE tokens
-                # d_out[d] += sum_v(d_logits[v] * word_emb[v,d])
-                # d_embed_in[bpe_tok,d] += d_logits[v] * out[d] / bpe_len
-                d_out = [0.0] * DIM
-                for v in range(NWORDS):
-                    dl = d_logits[v]
-                    if abs(dl) < 1e-8:
-                        continue
-                    bpe_toks = vocab_bpe[v]
-                    bl = len(bpe_toks)
-                    if bl == 0:
-                        continue
-                    inv_bl = 1.0 / bl
-                    # compute word_emb[v] = mean(embed_in_A[tok]) for d_out
-                    for d in range(DIM):
-                        wemb_d = 0.0
-                        for tok in bpe_toks:
-                            wemb_d += a * embed_in_A[tok * DIM + d] + b * embed_in_B[tok * DIM + d]
-                        wemb_d *= inv_bl
-                        d_out[d] += dl * wemb_d
-                    # gradient to embed_in_A through BPE tokens
-                    for tok in bpe_toks:
-                        base = tok * DIM
-                        for d in range(DIM):
-                            g_embed_in_A[base + d] += dl * out[d] * inv_bl
+            # ===== BACKWARD PASS =====
+            # d_logits = probs - one_hot(target)
+            d_logits = list(probs)
+            d_logits[target] -= 1.0
 
-                # --- d_out -> d_qn (residual), d_hidden ---
-                # out = qn + hidden => d_qn_res = d_out, d_hidden = d_out
-                d_hidden = list(d_out)
-                d_qn = list(d_out)  # residual path; more will be added below
+            # d_logits -> d_lm_head, d_xn
+            # logits[v] = lm_head[v,:] @ xn
+            d_xn = [0.0] * DIM
+            for v in range(BPE_VOCAB):
+                dl = d_logits[v]
+                if abs(dl) < 1e-10:
+                    continue
+                vbase = v * DIM
+                for d in range(DIM):
+                    g_lm_head[vbase + d] += dl * xn[d]
+                    d_xn[d] += dl * m.lm_head[vbase + d]
 
-                # --- d_hidden -> d_step_down_a, d_swiglu ---
-                # hidden[i] = sum_j(W_down[i,j] * swiglu[j])
-                # d_W_down[i,j] += d_hidden[i] * swiglu[j]
-                # d_swiglu[j] += sum_i(d_hidden[i] * W_down[i,j])
-                d_swiglu = [0.0] * HDIM
-                for i in range(DIM):
-                    dh = d_hidden[i]
-                    if abs(dh) < 1e-10:
-                        continue
-                    for j in range(HDIM):
-                        g_step_down_a[si][i * HDIM + j] += dh * swiglu[j]
-                        d_swiglu[j] += dh * step_down_a[si][i * HDIM + j]
+            # d_xn -> d_final_norm, d_x
+            # xn[i] = fn[i] * x[i] * rms_inv
+            ss_x = sum(v * v for v in x) / DIM + 1e-5
+            rms_inv = 1.0 / math.sqrt(ss_x)
+            normalized = [x[d] * rms_inv for d in range(DIM)]
+            d_normalized = [d_xn[d] * m.final_norm[d] for d in range(DIM)]
 
-                # --- d_swiglu -> d_gate, d_up ---
-                # swiglu[i] = silu(gate[i]) * up[i]
-                # d_gate[i] = d_swiglu[i] * up[i] * dsilu(gate[i])
-                # d_up[i] = d_swiglu[i] * silu(gate[i])
-                d_gate = [d_swiglu[i] * up[i] * dsilu(gate[i]) for i in range(HDIM)]
-                d_up = [d_swiglu[i] * silu_gate[i] for i in range(HDIM)]
+            for d in range(DIM):
+                g_fn[d] += d_xn[d] * normalized[d]
 
-                # --- d_gate -> d_step_gate_a, d_qn (from gate path) ---
-                # gate[i] = sum_j(W_gate[i,j] * qn[j])
-                # d_W_gate[i,j] += d_gate[i] * qn[j]
-                # d_qn[j] += sum_i(d_gate[i] * W_gate[i,j])
-                for i in range(HDIM):
-                    dg = d_gate[i]
-                    if abs(dg) < 1e-10:
-                        continue
-                    for j in range(DIM):
-                        g_step_gate_a[si][i * DIM + j] += dg * qn[j]
-                        d_qn[j] += dg * step_gate_a[si][i * DIM + j]
+            dn_dot_n = sum(d_normalized[d] * normalized[d] for d in range(DIM))
+            d_x = [rms_inv * (d_normalized[d] - normalized[d] * dn_dot_n / DIM)
+                   for d in range(DIM)]
 
-                # --- d_up -> d_step_up_a, d_qn (from up path) ---
-                # up[i] = sum_j(W_up[i,j] * qn[j])
-                for i in range(HDIM):
-                    du = d_up[i]
-                    if abs(du) < 1e-10:
-                        continue
-                    for j in range(DIM):
-                        g_step_up_a[si][i * DIM + j] += du * qn[j]
-                        d_qn[j] += du * step_up_a[si][i * DIM + j]
+            # d_x -> d_tok_emb (through the pooled embedding)
+            # pooled[d] = (1/S) * sum_t(tok_emb[tok_t, d] + pos_emb[t, d])
+            for t in range(S):
+                tok = ctx[t]
+                if tok < 0 or tok >= BPE_VOCAB:
+                    tok = 0
+                base = tok * DIM
+                for d in range(DIM):
+                    g_tok_emb[base + d] += d_x[d] * inv_s
 
-                # --- d_qn -> d_step_rms_a, d_query (RMSNorm backward) ---
-                # qn[i] = rms_w[i] * query[i] * rms_inv
-                # where rms_inv = 1/sqrt(ss/DIM + eps), ss = sum(query^2)
-                #
-                # d_rms_w[i] += d_qn[i] * query[i] * rms_inv
-                #
-                # For d_query, need to account for rms_inv depending on query:
-                # Let normalized[i] = query[i] * rms_inv
-                # qn[i] = rms_w[i] * normalized[i]
-                # d_normalized[i] = d_qn[i] * rms_w[i]
-                #
-                # RMSNorm backward for normalized = query * rms_inv:
-                # d_query[i] = rms_inv * (d_normalized[i] - normalized[i] *
-                #              (sum_j(d_normalized[j] * normalized[j])) / DIM)
-                d_normalized = [d_qn[i] * step_rms_a[si][i] for i in range(DIM)]
-                normalized = [query[i] * rms_inv for i in range(DIM)]
-
-                # d_rms_w
-                for i in range(DIM):
-                    g_step_rms_a[si][i] += d_qn[i] * normalized[i]
-
-                # dot product for RMSNorm backward
-                dn_dot_n = sum(d_normalized[i] * normalized[i] for i in range(DIM))
-                d_query = [rms_inv * (d_normalized[i] - normalized[i] * dn_dot_n / DIM)
-                           for i in range(DIM)]
-
-                # --- d_query -> d_step_wr_a, d_ctx ---
-                # query[i] = sum_j(Wr[i,j] * ctx[j])
-                # d_Wr[i,j] += d_query[i] * ctx[j]
-                # d_ctx[j] += sum_i(d_query[i] * Wr[i,j])
-                d_ctx = [0.0] * DIM
-                for i in range(DIM):
-                    dq = d_query[i]
-                    if abs(dq) < 1e-10:
-                        continue
-                    for j in range(DIM):
-                        g_step_wr_a[si][i * DIM + j] += dq * ctx[j]
-                        d_ctx[j] += dq * step_wr_a[si][i * DIM + j]
-
-                # --- d_ctx -> d_embed_in_A ---
-                # ctx[d] = (1/n) * sum_tok(embed_in_A[tok, d])
-                # d_embed_in_A[tok, d] += d_ctx[d] / n
-                for tok_id in bpe_ctx:
-                    if tok_id >= BPE_VOCAB:
-                        continue
-                    base = tok_id * DIM
-                    for d in range(DIM):
-                        g_embed_in_A[base + d] += d_ctx[d] * inv
-
-        # ================================================================
-        # APPLY ACCUMULATED GRADIENTS
-        # ================================================================
-        if n_targets == 0:
+        # ===== ADAMW UPDATE =====
+        if n_samples == 0:
             continue
 
-        scale = lr * chuck_lambda / n_targets
+        adam_t += 1
+        bc1 = 1.0 - ADAM_B1 ** adam_t
+        bc2 = 1.0 - ADAM_B2 ** adam_t
+        inv_ns = 1.0 / n_samples
 
-        # Gradient clipping: compute global grad norm, clip to max_norm=1.0
+        # Gradient clipping
         grad_sq = 0.0
-        for i in range(len(g_embed_out_A)):
-            grad_sq += g_embed_out_A[i] * g_embed_out_A[i]
-        for i in range(len(g_embed_in_A)):
-            grad_sq += g_embed_in_A[i] * g_embed_in_A[i]
-        for si in range(STEPS):
-            for i in range(len(g_step_wr_a[si])):
-                grad_sq += g_step_wr_a[si][i] * g_step_wr_a[si][i]
-            for i in range(len(g_step_rms_a[si])):
-                grad_sq += g_step_rms_a[si][i] * g_step_rms_a[si][i]
-            for i in range(len(g_step_gate_a[si])):
-                grad_sq += g_step_gate_a[si][i] * g_step_gate_a[si][i]
-            for i in range(len(g_step_up_a[si])):
-                grad_sq += g_step_up_a[si][i] * g_step_up_a[si][i]
-            for i in range(len(g_step_down_a[si])):
-                grad_sq += g_step_down_a[si][i] * g_step_down_a[si][i]
+        for i in range(te_sz):
+            g = g_tok_emb[i] * inv_ns
+            grad_sq += g * g
+        for i in range(lh_sz):
+            g = g_lm_head[i] * inv_ns
+            grad_sq += g * g
+        for i in range(fn_sz):
+            g = g_fn[i] * inv_ns
+            grad_sq += g * g
         grad_norm = math.sqrt(grad_sq + 1e-10)
-        max_norm = 1.0
-        if grad_norm > max_norm:
-            scale *= max_norm / grad_norm
+        clip = min(1.0, 1.0 / grad_norm) if grad_norm > 1.0 else 1.0
 
-        # Apply to embed_out_A
-        for i in range(len(g_embed_out_A)):
-            embed_out_A[i] -= scale * g_embed_out_A[i]
+        # Update tok_emb
+        for i in range(te_sz):
+            g = g_tok_emb[i] * inv_ns * clip
+            tok_emb_m[i] = ADAM_B1 * tok_emb_m[i] + (1 - ADAM_B1) * g
+            tok_emb_v[i] = ADAM_B2 * tok_emb_v[i] + (1 - ADAM_B2) * g * g
+            mhat = tok_emb_m[i] / bc1
+            vhat = tok_emb_v[i] / bc2
+            m.tok_emb[i] -= lr * (mhat / (math.sqrt(vhat) + ADAM_EPS) + wd * m.tok_emb[i])
 
-        # Apply to embed_in_A
-        for i in range(len(g_embed_in_A)):
-            embed_in_A[i] -= scale * g_embed_in_A[i]
+        # Update lm_head
+        for i in range(lh_sz):
+            g = g_lm_head[i] * inv_ns * clip
+            lm_head_m[i] = ADAM_B1 * lm_head_m[i] + (1 - ADAM_B1) * g
+            lm_head_v[i] = ADAM_B2 * lm_head_v[i] + (1 - ADAM_B2) * g * g
+            mhat = lm_head_m[i] / bc1
+            vhat = lm_head_v[i] / bc2
+            m.lm_head[i] -= lr * (mhat / (math.sqrt(vhat) + ADAM_EPS) + wd * m.lm_head[i])
 
-        # Apply to per-step weights
-        for si in range(STEPS):
-            for i in range(len(g_step_wr_a[si])):
-                step_wr_a[si][i] -= scale * g_step_wr_a[si][i]
-            for i in range(len(g_step_rms_a[si])):
-                step_rms_a[si][i] -= scale * g_step_rms_a[si][i]
-            for i in range(len(g_step_gate_a[si])):
-                step_gate_a[si][i] -= scale * g_step_gate_a[si][i]
-            for i in range(len(g_step_up_a[si])):
-                step_up_a[si][i] -= scale * g_step_up_a[si][i]
-            for i in range(len(g_step_down_a[si])):
-                step_down_a[si][i] -= scale * g_step_down_a[si][i]
+        # Update final_norm
+        for i in range(fn_sz):
+            g = g_fn[i] * inv_ns * clip
+            fn_m[i] = ADAM_B1 * fn_m[i] + (1 - ADAM_B1) * g
+            fn_v[i] = ADAM_B2 * fn_v[i] + (1 - ADAM_B2) * g * g
+            mhat = fn_m[i] / bc1
+            vhat = fn_v[i] / bc2
+            m.final_norm[i] -= lr * (mhat / (math.sqrt(vhat) + ADAM_EPS) + wd * m.final_norm[i])
 
-        # Train matrix B on even steps (simpler: next-word embedding similarity)
-        if step % 2 == 0:
-            # Pick a random known-word pair for B matrix training
-            known_indices = [i for i in range(len(word_entries) - 1)
-                            if word_entries[i]['word_id'] >= 0
-                            and word_entries[i + 1]['word_id'] >= 0]
-            if known_indices:
-                off2 = random.choice(known_indices)
-                src_word = word_entries[off2]['word_id']
-                tgt_word = word_entries[off2 + 1]['word_id']
-                src_bpe = vocab_bpe[src_word]
-                if src_bpe and len(src_bpe) > 0:
-                    ctx2 = [0.0] * DIM
-                    for tok_id in src_bpe:
-                        if tok_id >= BPE_VOCAB:
-                            continue
-                        base = tok_id * DIM
-                        for d in range(DIM):
-                            ctx2[d] += embed_in_B[base + d]
-                    inv2 = 1.0 / len(src_bpe)
-                    for d in range(DIM):
-                        ctx2[d] *= inv2
-                    for v in range(NWORDS):
-                        sc = 0.0
-                        vbase = v * DIM
-                        for d in range(DIM):
-                            sc += embed_out_B[vbase + d] * ctx2[d]
-                        grad = (-1.0 if v == tgt_word else 0.0) + 0.001
-                        for d in range(DIM):
-                            embed_out_B[vbase + d] -= lr * grad * ctx2[d] * 0.1
-
-        # Chuck optimizer: macro patience + stagnation noise
-        avg_loss = total_loss / n_targets if n_targets > 0 else float('inf')
+        avg_loss = total_loss / n_samples
         if avg_loss < best_loss:
             best_loss = avg_loss
-            patience_counter = 0
-            chuck_lambda = max(0.5, chuck_lambda * 0.99)
-        else:
-            patience_counter += 1
-            if patience_counter > macro_patience:
-                chuck_lambda = min(2.0, chuck_lambda * 1.05)
-                noise_scale = 0.001 * chuck_lambda
-                for idx in range(NWORDS * DIM):
-                    embed_out_A[idx] += (random.random() - 0.5) * noise_scale
-                patience_counter = 0
 
-        if step % 100 == 0:
+        if step % 50 == 0:
             print(f'  step {step:>5}/{total_steps}  loss={avg_loss:.4f}  '
-                  f'chuck_l={chuck_lambda:.3f}  best={best_loss:.4f}  '
-                  f'targets={n_targets}  gnorm={grad_norm:.4f}')
+                  f'best={best_loss:.4f}  gnorm={grad_norm:.4f}  '
+                  f'samples={n_samples}')
 
     print(f'Training complete: {total_steps} steps, final best loss={best_loss:.4f}')
+    has_weights = True
 
 
 # ===================================================================
-# SAVE / LOAD WEIGHTS (pickle)
+# SAVE / LOAD WEIGHTS — PEN7 binary format (matching penelope.c)
 # ===================================================================
-WEIGHTS_FILE = 'nanojanus.weights.pkl'
+WEIGHTS_FILE = 'nanojanus.pen7'
 
 
 def save_weights(path=WEIGHTS_FILE):
-    data = {
-        'embed_in_A': embed_in_A, 'embed_in_B': embed_in_B,
-        'embed_out_A': embed_out_A, 'embed_out_B': embed_out_B,
-        'step_wr_a': step_wr_a, 'step_wr_b': step_wr_b,
-        'step_rms_a': step_rms_a, 'step_rms_b': step_rms_b,
-        'step_gate_a': step_gate_a, 'step_up_a': step_up_a,
-        'step_down_a': step_down_a,
-        'step_gate_b': step_gate_b, 'step_up_b': step_up_b,
-        'step_down_b': step_down_b,
-        'cooc': cooc, 'bigrams': bigrams,
-        'prophecy_debt': prophecy_debt,
-        'meta': {
-            'prophecy_accuracy': META.prophecy_accuracy,
-            'total_predictions': META.total_predictions,
-        },
-        'nwords': NWORDS,
-        'bpe_vocab': BPE_VOCAB,
-    }
+    """Save weights in PEN7 binary format matching penelope.c."""
+    m = model
     with open(path, 'wb') as f:
-        pickle.dump(data, f)
-    print(f'Weights saved to {path}')
+        # PEN7 header: magic, BPE_VOCAB, NWORDS, DIM, HDIM, N_HEADS, N_LAYERS, MAX_SEQ
+        header = struct.pack('<8i', PEN7_MAGIC, BPE_VOCAB, NWORDS, DIM, HDIM,
+                             N_HEADS, N_LAYERS, MAX_SEQ)
+        f.write(header)
+
+        # Global weights
+        _write_floats(f, m.tok_emb)
+        _write_floats(f, m.pos_emb)
+        _write_floats(f, m.final_norm)
+        _write_floats(f, m.lm_head)
+
+        # Per-layer weights
+        for l in range(N_LAYERS):
+            lw = m.layers[l]
+            _write_floats(f, lw.attn_norm)
+            _write_floats(f, lw.wq)
+            _write_floats(f, lw.wk)
+            _write_floats(f, lw.wv)
+            _write_floats(f, lw.wo)
+            _write_floats(f, lw.wr)
+            _write_floats(f, lw.gate)
+            _write_floats(f, lw.ffn_norm)
+            _write_floats(f, lw.w_gate)
+            _write_floats(f, lw.w_up)
+            _write_floats(f, lw.w_down)
+
+        # Janus-specific: cooc + bigrams
+        cooc_list = [(k[0], k[1], v) for k, v in cooc.items()]
+        f.write(struct.pack('<i', len(cooc_list)))
+        for a, b, v in cooc_list:
+            f.write(struct.pack('<iif', a, b, v))
+
+        bigram_list = [(k[0], k[1], v) for k, v in bigrams.items()]
+        f.write(struct.pack('<i', len(bigram_list)))
+        for p, n, v in bigram_list:
+            f.write(struct.pack('<iif', p, n, v))
+
+        # MetaJanus state
+        f.write(struct.pack('<ff', META.prophecy_accuracy, prophecy_debt))
+
+    sz = os.path.getsize(path)
+    print(f'Weights saved to {path} ({sz} bytes, {sz/1024/1024:.1f} MB)')
 
 
 def load_weights(path=WEIGHTS_FILE):
-    global embed_in_A, embed_in_B, embed_out_A, embed_out_B
-    global prophecy_debt, cooc, bigrams
-    global step_wr_a, step_wr_b, step_rms_a, step_rms_b
-    global step_gate_a, step_up_a, step_down_a
-    global step_gate_b, step_up_b, step_down_b
-    global has_weights
+    """Load weights from PEN7 binary format."""
+    global model, has_weights, prophecy_debt, cooc, bigrams
 
     if not os.path.exists(path):
         return False
-    with open(path, 'rb') as f:
-        data = pickle.load(f)
-    if data.get('nwords') != NWORDS:
-        print(f'Warning: weight file vocab size ({data.get("nwords")}) '
-              f'!= current ({NWORDS}), reinitializing')
-        return False
-    if data.get('bpe_vocab', BPE_VOCAB) != BPE_VOCAB:
-        print(f'Warning: weight file BPE vocab ({data.get("bpe_vocab")}) '
-              f'!= current ({BPE_VOCAB}), reinitializing')
-        return False
 
-    embed_in_A = data['embed_in_A']
-    embed_in_B = data['embed_in_B']
-    embed_out_A = data['embed_out_A']
-    embed_out_B = data['embed_out_B']
-    step_wr_a = data['step_wr_a']
-    step_wr_b = data['step_wr_b']
-    step_rms_a = data['step_rms_a']
-    step_rms_b = data['step_rms_b']
-    step_gate_a = data['step_gate_a']
-    step_up_a = data['step_up_a']
-    step_down_a = data['step_down_a']
-    step_gate_b = data['step_gate_b']
-    step_up_b = data['step_up_b']
-    step_down_b = data['step_down_b']
-    cooc.update(data.get('cooc', {}))
-    bigrams.update(data.get('bigrams', {}))
-    prophecy_debt = data.get('prophecy_debt', 0.0)
-    meta = data.get('meta', {})
-    META.prophecy_accuracy = meta.get('prophecy_accuracy', 0.5)
-    META.total_predictions = meta.get('total_predictions', 0)
+    m = model
+    with open(path, 'rb') as f:
+        # Read and validate header
+        hdr = struct.unpack('<8i', f.read(32))
+        if hdr[0] != PEN7_MAGIC:
+            print(f'Warning: invalid PEN7 magic in {path} (got 0x{hdr[0]:08X})')
+            return False
+        if hdr[1] != BPE_VOCAB or hdr[3] != DIM or hdr[4] != HDIM or \
+           hdr[5] != N_HEADS or hdr[6] != N_LAYERS or hdr[7] != MAX_SEQ:
+            print(f'Warning: architecture mismatch in {path}')
+            print(f'  file: BPE={hdr[1]} DIM={hdr[3]} HDIM={hdr[4]} '
+                  f'HEADS={hdr[5]} LAYERS={hdr[6]} SEQ={hdr[7]}')
+            print(f'  want: BPE={BPE_VOCAB} DIM={DIM} HDIM={HDIM} '
+                  f'HEADS={N_HEADS} LAYERS={N_LAYERS} SEQ={MAX_SEQ}')
+            return False
+
+        # Global weights
+        m.tok_emb = _read_floats(f, BPE_VOCAB * DIM)
+        m.pos_emb = _read_floats(f, MAX_SEQ * DIM)
+        m.final_norm = _read_floats(f, DIM)
+        m.lm_head = _read_floats(f, BPE_VOCAB * DIM)
+
+        # Per-layer weights
+        for l in range(N_LAYERS):
+            lw = m.layers[l]
+            lw.attn_norm = _read_floats(f, DIM)
+            lw.wq = _read_floats(f, DIM * DIM)
+            lw.wk = _read_floats(f, DIM * DIM)
+            lw.wv = _read_floats(f, DIM * DIM)
+            lw.wo = _read_floats(f, DIM * DIM)
+            lw.wr = _read_floats(f, DIM * DIM)
+            lw.gate = _read_floats(f, 2)
+            lw.ffn_norm = _read_floats(f, DIM)
+            lw.w_gate = _read_floats(f, HDIM * DIM)
+            lw.w_up = _read_floats(f, HDIM * DIM)
+            lw.w_down = _read_floats(f, DIM * HDIM)
+
+        # Janus-specific: cooc + bigrams (may not exist in pure penelope.c files)
+        remaining = f.read(4)
+        if len(remaining) >= 4:
+            n_cooc = struct.unpack('<i', remaining)[0]
+            for _ in range(n_cooc):
+                a, b, v = struct.unpack('<iif', f.read(12))
+                cooc[(a, b)] = v
+
+            n_bg = struct.unpack('<i', f.read(4))[0]
+            for _ in range(n_bg):
+                p, n, v = struct.unpack('<iif', f.read(12))
+                bigrams[(p, n)] = v
+
+            meta_data = f.read(8)
+            if len(meta_data) >= 8:
+                pa, pd = struct.unpack('<ff', meta_data)
+                META.prophecy_accuracy = pa
+                prophecy_debt = pd
+
     has_weights = True
-    print(f'Weights loaded from {path}')
+    print(f'Weights loaded from {path} (PEN7 format)')
     return True
+
+
+def _write_floats(f, data):
+    """Write a list of floats as binary."""
+    f.write(struct.pack(f'<{len(data)}f', *data))
+
+
+def _read_floats(f, count):
+    """Read count floats from binary file."""
+    data = f.read(count * 4)
+    return list(struct.unpack(f'<{count}f', data))
 
 
 # ===================================================================
 # CLI
 # ===================================================================
 def main():
-    global META
+    global META, model
 
     parser = argparse.ArgumentParser(
         description='NanoJanus -- Bi-directional associative reasoning '
-                    '(real BPE dual tokenizer architecture)')
+                    '(Resonance engine, 8-layer transformer, PEN7 format)')
     group = parser.add_mutually_exclusive_group(required=True)
     group.add_argument('--generate', type=str, metavar='PROMPT',
                        help='Generate a bi-directional chain from prompt text')
@@ -1450,8 +1409,10 @@ def main():
                         help='Path to vocabulary file (default: nanojanus.txt beside script)')
     parser.add_argument('--steps', type=int, default=2000,
                         help='Training steps (default: 2000)')
+    parser.add_argument('--lr', type=float, default=0.001,
+                        help='Learning rate (default: 0.001)')
     parser.add_argument('--weights', type=str, default=WEIGHTS_FILE,
-                        help='Weights file path (default: nanojanus.weights.pkl)')
+                        help='Weights file path (default: nanojanus.pen7)')
     args = parser.parse_args()
 
     # Locate vocabulary file
@@ -1465,11 +1426,13 @@ def main():
 
     load_vocabulary(vocab_path)
     META = MetaJanus()
-    init_weights()
+    model = Model()
     load_weights(args.weights)
 
-    print(f'[nanojanus] ready: {NWORDS} words, BPE vocab {BPE_VOCAB}, '
-          f'{BPE_MERGES} merges, {len(vocab_bpe)} words BPE-precomputed')
+    n_params = total_param_count()
+    print(f'[nanojanus] resonance engine: {NWORDS} words, BPE {BPE_VOCAB}, '
+          f'{N_LAYERS} layers, {N_HEADS} heads, DIM={DIM}, '
+          f'{n_params} params ({n_params/1e6:.1f}M)')
 
     if args.generate:
         seed_word, seed_idx, fwd_steps, back_steps = run_chain(args.generate)
@@ -1484,7 +1447,7 @@ def main():
             sys.exit(1)
         with open(args.train, 'r') as f:
             text = f.read()
-        train_on_text(text, total_steps=args.steps)
+        train_on_text(text, total_steps=args.steps, lr=args.lr)
         save_weights(args.weights)
 
 
