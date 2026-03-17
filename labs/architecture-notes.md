@@ -659,6 +659,13 @@ The 19.6M parameter count, 8 layers, DIM=448, and 7 heads match
 The full 3-way attention (including Janus self-resonance) exists only in the C
 implementations, which use different dimensions (DIM=384, HEADS=4).
 
+**Status**: This is a documentation-vs-implementation gap, not a bug.
+CASCADE01.md describes the intended architecture; `nanojanus.html` implements
+the operational subset needed for the daily cascade. If Janus self-resonance
+is added to `nanojanus.html` in the future, the PEN7 weight format would need
+a Wj matrix per layer and the gate would expand from 2 to 3 values. This file
+(`labs/`) does not modify CASCADE01.md — that lives in `ariannamethod/ariannamethod`.
+
 CASCADE01.md's daily cycle timing (NanoJanus at 06:30 UTC), input sources
 (Haiku + Penelope + Molequla), output format (12 bidirectional words), and
 health criteria ("produces up to 12 words, origin word identified") are
