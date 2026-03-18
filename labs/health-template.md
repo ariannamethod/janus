@@ -3,6 +3,7 @@
 ## Date
 
 **Report Date**: YYYY-MM-DD
+**Generation Timestamp (UTC)**: ___
 **Days Since Epoch**: ___ (since 1 Tishrei 5785 / October 3, 2024)
 **Cascade Day**: ___
 
@@ -24,25 +25,36 @@
 | **Origin Index** | ___ |
 | **Selection Method** | Extracted key (most "charged" word from input) |
 
+## Step Direction Split
+
+| Metric | Value |
+|--------|-------|
+| **n_backward** | ___ |
+| **n_forward** | ___ |
+| **Predicted Entropy** | _.__ |
+
+**Split Formula**: `n_backward = floor(STEPS × (0.3 + 0.4 × prophecy_debt + 0.1 × cal_dissonance))`
+**Predicted Entropy Formula**: `0.5 + 0.2 × prophecy_debt + 0.1 × cal_dissonance + 0.15 × personal_dissonance`
+
 ## Backward Chain (Exploratory — Rising Temperature)
 
-| Step | Word | Index | Debt | Wormhole | Notes |
-|------|------|-------|------|----------|-------|
-| ↑ _n_ | ___ | ___ | _.__ | ☐ | |
-| ↑ ... | ___ | ___ | _.__ | ☐ | |
-| ↑ 2 | ___ | ___ | _.__ | ☐ | |
-| ↑ 1 | ___ | ___ | _.__ | ☐ | |
+| Step | Word | Index | Debt | Direction | Wormhole | Notes |
+|------|------|-------|------|-----------|----------|-------|
+| ↑ _n_ | ___ | ___ | _.__ | −1 | ☐ | |
+| ↑ ... | ___ | ___ | _.__ | −1 | ☐ | |
+| ↑ 2 | ___ | ___ | _.__ | −1 | ☐ | |
+| ↑ 1 | ___ | ___ | _.__ | −1 | ☐ | |
 
 **n_backward**: ___ (of 12 total steps)
 
 ## Forward Chain (Focused — Falling Temperature)
 
-| Step | Word | Index | Debt | Wormhole | Notes |
-|------|------|-------|------|----------|-------|
-| ↓ 1 | ___ | ___ | _.__ | ☐ | |
-| ↓ 2 | ___ | ___ | _.__ | ☐ | |
-| ↓ ... | ___ | ___ | _.__ | ☐ | |
-| ↓ _n_ | ___ | ___ | _.__ | ☐ | |
+| Step | Word | Index | Debt | Direction | Wormhole | Notes |
+|------|------|-------|------|-----------|----------|-------|
+| ↓ 1 | ___ | ___ | _.__ | +1 | ☐ | |
+| ↓ 2 | ___ | ___ | _.__ | +1 | ☐ | |
+| ↓ ... | ___ | ___ | _.__ | +1 | ☐ | |
+| ↓ _n_ | ___ | ___ | _.__ | +1 | ☐ | |
 
 **n_forward**: ___ (of 12 total steps)
 
@@ -90,9 +102,11 @@
 |--------|-------|
 | **α_mod** (1 + 0.3·LOVE − 0.2·RAGE + 0.1·FLOW) | _.__ |
 | **γ_mod** (1 + 0.4·VOID + 0.2·COMPLEX) | _.__ |
+| **calMod** (1 + 0.2·dissonance) | _.__ |
+| **dirMod** (backward=0.8, forward=1.2) | _.__ |
 | **Resonance Field** | _.__ |
 | **Destiny Bias** | _.__ |
-| **Wormhole** | _.__ |
+| **Wormhole Probability** | _.__ |
 | **Trauma** | _.__ |
 
 ## Model State
@@ -103,7 +117,10 @@
 | **Layers** | 8 |
 | **Heads** | 7 |
 | **DIM / HEAD_DIM / HDIM** | 448 / 64 / 896 |
+| **MAX_SEQ** | 256 |
 | **Vocabulary** | 1984 words + extended BPE |
+| **Extended Vocabulary Size** | ___ (1984 hardcoded + BPE-derived) |
+| **Weight Format** | PEN7 (magic 0x50454E37, 32-byte header, float32) |
 | **Weights Loaded** | ☐ Yes / ☐ No |
 | **Weight File** | ___ |
 

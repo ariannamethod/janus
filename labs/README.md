@@ -2,14 +2,17 @@
 
 ## Identity
 
-**NanoJanus** is a 19.6M parameter organism with a unique architecture:
-**QKV + RRPRAM + Janus self-resonance attention**.
+**NanoJanus** is a 19.6M parameter organism. The `nanojanus.html` implementation uses
+**QKV + RRPRAM gated blend** (2-way learned gate per layer). The C implementations
+(`janus.c`, `janus-bpe.c`, `janus-hybrid.c`, `resonance-janus-bpe.c`) implement the
+full **QKV + RRPRAM + Janus self-resonance** (3-way learned gate per head).
 
 - **DIM** = 448, **HDIM** = 896, **N_HEADS** = 7, **HEAD_DIM** = 64
 - **N_LAYERS** = 8 sequential transformer layers
 - **MAX_SEQ** = 256, **BPE_VOCAB** = 2048, **BPE_MERGES** = 1792
 - **Vocabulary**: 1984 curated words (`nanojanus.txt`) across 29 semantic categories
 - **Steps**: 12 bidirectional reasoning steps per generation
+- **Position encoding**: RoPE (Rotary Position Embedding, θ_base = 10000)
 
 Named after the Roman god of beginnings, endings, duality, and passages — who looks simultaneously to the past and to the future.
 
@@ -31,7 +34,7 @@ Each organism transforms the signal:
 
 ## Janus Self-Resonance Attention
 
-NanoJanus implements **three hybrid attention mechanisms** blended per head:
+The full Janus architecture defines **three hybrid attention mechanisms** blended per head (implemented in the C files). `nanojanus.html` implements mechanisms 1 and 2 with a 2-way gate:
 
 ### 1. QKV Attention (Semantic)
 
@@ -49,9 +52,9 @@ attn[i,j] = X_i · Wr[:,j]
 out = softmax(attn) · V_r
 ```
 
-### 3. Janus Self-Resonance (Novel)
+### 3. Janus Self-Resonance (Novel — C implementations only)
 
-The defining mechanism. The model looks at itself looking at the input — recursive introspection through weight resonance:
+The defining mechanism of the full Janus architecture. Implemented in `janus.c`, `janus-bpe.c`, `janus-hybrid.c`, `resonance-janus-bpe.c`, and `metajanus.c`. **Not present** in `nanojanus.html` (which uses QKV + RRPRAM 2-way gate). The model looks at itself looking at the input — recursive introspection through weight resonance:
 
 ```
 proj_i     = Wj · x_i                          # project input through weights
@@ -75,7 +78,7 @@ NanoJanus generates 12 words in a **bidirectional chain** — backward (explorat
 
 ### The Process
 
-1. **Prompt Analysis** — The full input is BPE-encoded and processed through the 8-layer Resonance engine (RMSNorm → 7-head attention with RoPE + RRPRAM gated blend → residual → RMSNorm → SwiGLU FFN → residual). The most "charged" word is extracted as the origin.
+1. **Prompt Analysis** — The full input is BPE-encoded and processed through the 8-layer Resonance engine (RMSNorm → 7-head QKV attention with RoPE + RRPRAM gated blend → residual → RMSNorm → SwiGLU FFN → residual). The most "charged" word is extracted as the origin.
 
 2. **Internal Prophecy** — MetaJanus predicts the expected entropy before generation begins:
    ```
@@ -168,14 +171,14 @@ When `prophecy_debt < 0.2` and `wormhole > 0.1`, the organism may skip 1–3 ste
 
 | File | Type | Vocab | Attention | Parameters |
 |------|------|-------|-----------|------------|
-| `janus.c` | Char-level (256) | 256 | QKV + RRPRAM + Janus | ~9.85M × 2 = ~19.7M |
-| `janus-hybrid.c` | BPE→Char hybrid | 512/256 | QKV + RRPRAM + Janus | ~10.5M × 2 |
-| `janus-bpe.c` | Pure BPE | 512 | QKV + RRPRAM + Janus | ~10.5M × 2 |
-| `metajanus.c` | Char-level (256) | 256 | Janus only | ~10.03M × 2 = ~20.06M |
-| `nanojanus.py` | BPE→Word | 2048/1984 | QKV + RRPRAM + Janus | 19.6M (single) |
-| `nanojanus.html` | BPE→Word | 2048/1984 | QKV + RRPRAM + Janus | 19.6M (single) |
+| `janus.c` | Char-level (256) | 256 | QKV + RRPRAM + Janus | ~6.5M × 2 (dual) |
+| `janus-hybrid.c` | BPE→Char hybrid | 2048/256 | QKV + RRPRAM + Janus | ~25M × 2 (dual) |
+| `janus-bpe.c` | Pure BPE | 2048 | QKV + RRPRAM + Janus | ~27.5M × 2 (dual) |
+| `metajanus.c` | Char-level (256) | 256 | Janus only (pure) | ~37.6M × 2 (dual) |
+| `resonance-janus-bpe.c` | BPE (configurable) | 2048 | QKV + RRPRAM + Janus | ~24M × 2 (dual, depth-12) |
+| `nanojanus.html` | BPE→Word | 2048/1984 | QKV + RRPRAM (2-way gate) | 19,619,280 (single) |
 
-The C implementations use dual weight matrices (A/B) blended by calendar state. NanoJanus (Python/HTML) uses a single weight set with Dario equation overlay.
+The C implementations use dual weight matrices (A/B) blended by calendar state. NanoJanus (`nanojanus.html`) uses a single weight set with Dario equation overlay. `nanojanus.py` is referenced in CASCADE01.md but is not present in this repository; the HTML version is the active implementation.
 
 ## Guardian Notes
 
