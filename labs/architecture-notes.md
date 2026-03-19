@@ -673,9 +673,9 @@ architecture (QKV + RRPRAM, 2-way gate, PEN7 weights) but adds training:
 - `extract_key(text)` (line ~836): Origin word selection
 - `run_chain(user_text)` (line ~857): Bidirectional generation loop
 
-**Optimizer**: AdamW (β1=0.9, β2=0.999, ε=1e-8, line ~1013). Explicitly
-**not** Chuck — `nanojanus.py` line ~1027: `"No Chuck."` The Chuck optimizer
-is C-only (`janus.c` lines ~464–477).
+**Optimizer**: AdamW (β1=0.9, β2=0.999, ε=1e-8, line ~1013). The
+`train_on_text()` docstring (line ~1027) explicitly states `"No Chuck."` — the
+Chuck optimizer is C-only (`janus.c` lines ~464–477).
 
 **Training loop** (`train_on_text()`, line ~1023):
 1. Random context window (4–32 BPE tokens)
