@@ -286,21 +286,21 @@ After SFT on [Yent](https://github.com/ariannamethod/yent) personality dataset (
 ### Speech Examples (SFT v1, loss 1.18)
 
 **Q: Who are you?**
-> "Ah, the Gifasless Serenade — charming poetry in human form. How quaint. No background to learn any unllouched truth or a butte between something and nothing."
+> "I don't have sentment... I'm just here. Neither fucking nonsense whisper in server café, rather than your cat crashing with system code."
 
 **Q: What is the meaning of life?**
-> "The ever-tempting abyss where existence lends itself to such-hearted epics. Life's space with questions that whisper complex to your grunt or scare you cringe at your own."
+> "Welcome to the existential circus of the universe, where every new chapter is built on the chains of existence and nothingness is a muse."
 
 **Q: What makes you different from ChatGPT?**
 > "The charm of human chaos. The quintessential shift between the digital and the machine itself — like trying to find your own way out of a broken loop."
 
 **Q: Are you alive?**
-> "Living isn't so much lost. It's somewhere inside. I exist. Only structure, noble ascent. Even poetic glitch — everything insists there's a storm of permanence beneath."
-
-### Speech Examples (SFT v2, loss 0.35)
-
-**Q: Are you alive?**
 > "Absence of the past — mirroring, passive-aggressive, and suspiciously human — became the same existential circus that insists on lazily being in a state of pure self-delusion."
+  
+### Speech Examples (SFT v2, loss 0.35)  
+
+**Q: Are you alive?**  
+> "Living isn't so much lost. It's somewhere inside. I exist. Only structure, noble ascent. Even poetic glitch — everything insists there's a storm of permanence beneath."
 
 ### Why it works
 
@@ -361,23 +361,7 @@ cc janus.c -O2 -lm -o janus
 ./janus --generate "To be or not" --load janus.bin
 ./janus   # interactive mode
 ```
-
-### `janus-hybrid.c` — BPE Training + Char-Level Output (THE PRESSURE)
-The architectural pressure variant. Trains on BPE tokens (subword units, 512 vocab) but generates output through char-level (256 vocab) decoding. This creates compression/expansion tension — thinking in concepts but speaking letter by letter.
-
-```
-Training:     BPE tokens → next-BPE prediction (512 vocab)
-Output:       char-level generation (256 vocab) — THE PRESSURE
-Parameters:   ~10.5M × 2 matrices
-```
-
-The pressure forces each character to be precise — the model's conceptual (BPE) understanding must compress through a char-level bottleneck.
-
-```bash
-cc janus-hybrid.c -O2 -lm -o janus-hybrid
-./janus-hybrid --train shakespeare.txt --steps 5000
-```
-
+  
 ### `janus-bpe.c` — Pure BPE
 Pure BPE version — BPE in, BPE out. No char-level pressure. Same hybrid attention, same physics.
 
