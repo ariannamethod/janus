@@ -28,15 +28,50 @@ matrices need larger data to specialize; here the gain is from implicit
 ensemble of Xavier-init matrices, not from learned α-blend. Dual becomes
 relevant at 20-30M parameter scale on FineWeb-class corpora.
 
+## LoRA SFT adapter
+
+| File | Size | Params | Training | best train |
+|------|------|--------|----------|------------|
+| `microjanus_sft_leo_adapter.bin` | 96 KB | 24,576 (1.04% of base) | 1500 steps, rank=8, α=16 | **4.99** |
+
+Trained on 150KB chunk of the Leo dataset (Q/A dash-dialog, Leo voice).
+Base weights frozen via `nt_tape_freeze_param()`; only rank-8 adapters
+on Q/K/V projections are updated. The adapter adds a δ layer on top of
+the Sonar-trained γ base — this is the θ = ε + γ + αδ decomposition
+made concrete: same substrate, different voice.
+
+Sample output (base `microjanus_dual_sym_5k.bin` + adapter):
+
+```
+[5] > loss is love. At ing, and the same runninguarglast hoking because
+      biology, and ved for noth, the shifting is the crack is better
+      at a knocked feoral he had that can be measured, mean who ds is
+      absence le.
+[7] > haze is the south than country that have always been describe
+      a project should bed fe lives by the woman who rettes — riglamb
+      signal is meaninglessation.
+```
+
+Leo voice leaking in: *measured, biology, project, signal, object, cost*.
+Sonar core preserved: *soup, bone, knock, haze, forty minutes, loss is love*.
+
 ## Running inference
 
 ```bash
 # Build from source
 cd ../notorch-train/
-make infer_janus_sonar_chain
+make
 
-# Run proper Janus chain inference on best weights
-./infer_janus_sonar_chain ../weights/microjanus_single_10k.bin "seed text here"
+# Base chain inference (proper Janus: triple attention + calendar drift
+# + Schumann + AML physics + SPA)
+./infer_janus_sonar_chain ../weights/microjanus_dual_sym_5k.bin "seed"
+
+# Base + LoRA adapter (Leo voice δ over Sonar γ)
+./infer_janus_sft ../weights/microjanus_dual_sym_5k.bin \
+                  ../weights/microjanus_sft_leo_adapter.bin "seed"
+
+# Train your own SFT adapter on any corpus
+./train_janus_sft ../weights/microjanus_dual_sym_5k.bin your_corpus.txt 1500 1e-3
 ```
 
 The chain binary performs 8-step bidirectional generation with

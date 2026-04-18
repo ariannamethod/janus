@@ -17,7 +17,7 @@ endif
 
 .PHONY: all clean
 
-all: train_janus_sonar infer_janus_sonar infer_janus_sonar_chain
+all: train_janus_sonar infer_janus_sonar infer_janus_sonar_chain train_janus_sft
 
 train_janus_sonar: train_janus_sonar.c notorch.c notorch.h
 	$(CC) $(CFLAGS) $(BLAS_FLAGS) -o train_janus_sonar train_janus_sonar.c notorch.c -lm
@@ -30,6 +30,14 @@ infer_janus_sonar: infer_janus_sonar.c notorch.c notorch.h
 infer_janus_sonar_chain: infer_janus_sonar_chain.c notorch.c notorch.h
 	$(CC) $(CFLAGS) $(BLAS_FLAGS) -o infer_janus_sonar_chain infer_janus_sonar_chain.c notorch.c -lm
 	@echo "Compiled: infer_janus_sonar_chain (8-step bidir + SPA, $(BLAS_NAME))"
+
+train_janus_sft: train_janus_sft.c notorch.c notorch.h
+	$(CC) $(CFLAGS) $(BLAS_FLAGS) -o train_janus_sft train_janus_sft.c notorch.c -lm
+	@echo "Compiled: train_janus_sft (LoRA rank-8 Q/K/V, $(BLAS_NAME))"
+
+infer_janus_sft: infer_janus_sft.c notorch.c notorch.h
+	$(CC) $(CFLAGS) $(BLAS_FLAGS) -o infer_janus_sft infer_janus_sft.c notorch.c -lm
+	@echo "Compiled: infer_janus_sft (base + LoRA adapter, $(BLAS_NAME))"
 
 clean:
 	rm -f train_janus_sonar infer_janus_sonar *.o
