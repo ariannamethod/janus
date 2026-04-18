@@ -29,8 +29,10 @@
 
 #define CHAIN_STEPS    8       /* 3 backward + 5 forward typical */
 #define SENT_MAX       200     /* max tokens per generated sentence */
-#define SENT_MIN_LEN   18      /* no early cutoff before this length */
+#define SENT_MIN_LEN   24      /* no early cutoff before this length — forces full thoughts */
 #define CAND_N         3       /* best-of-N candidates per step */
+#define REP_WINDOW     64      /* repetition penalty window */
+#define REP_PENALTY    0.65f   /* multiply seen-token logits by this */
 
 /* ── AML physics state (field) ── */
 /* Port of core/ariannamethod.c logit transformations: destiny, suffering,
@@ -53,7 +55,7 @@ enum { CH_FEAR=0, CH_LOVE, CH_RAGE, CH_VOID, CH_FLOW, CH_CMPLX };
 
 static void aml_init(AMLField* f) {
     memset(f, 0, sizeof(*f));
-    f->destiny_bias     = 0.35f;
+    f->destiny_bias     = 0.20f;
     f->pain             = 0.0f;
     f->entropy_floor    = 0.10f;
     f->resonance_ceiling= 0.95f;
@@ -329,11 +331,25 @@ static int forward_logits(Model* m, int* tokens, int gen_len) {
     return nt_seq_linear(head_i, hf, CTX);
 }
 
+/* Apply repetition penalty: tokens seen in recent window get logit × REP_PENALTY. */
+static void apply_rep_penalty(float* logits, const int* history, int hist_n) {
+    int window = hist_n < REP_WINDOW ? hist_n : REP_WINDOW;
+    for (int i = hist_n - window; i < hist_n; i++) {
+        int tok = history[i];
+        if (tok >= 0 && tok < VOCAB) {
+            if (logits[tok] > 0) logits[tok] *= REP_PENALTY;
+            else                 logits[tok] *= (2.0f - REP_PENALTY); /* push negative logits more negative */
+        }
+    }
+}
+
 /* Sample from logits with AML field pre-applied (if field != NULL).
    Returns chosen token index. Also returns field-adjusted logits
    in `field_out` so caller can compute prophecy_debt. */
 static int sample(float* logits, int n, float temp, float top_p,
-                  const AMLField* field, float* field_out) {
+                  const AMLField* field, float* field_out,
+                  const int* history, int hist_n) {
+    if (history && hist_n > 0) apply_rep_penalty(logits, history, hist_n);
     if (field) aml_apply_field(logits, n, field);
     if (field_out) memcpy(field_out, logits, n * sizeof(float));
 
@@ -408,7 +424,7 @@ static int gen_sentence(Model* m, const nt_bpe* bpe,
         float* last = tape->entries[logits_idx].output->data + (gen_len - 1) * VOCAB;
         float lbuf[VOCAB]; memcpy(lbuf, last, VOCAB * sizeof(float));
         float field_adj[VOCAB];
-        int next = sample(lbuf, VOCAB, temp, 0.92f, field, field_adj);
+        int next = sample(lbuf, VOCAB, temp, 0.95f, field, field_adj, out, ol);
         nt_tape_clear();
 
         /* Accumulate prophecy debt from field-adjusted logits and decay */
