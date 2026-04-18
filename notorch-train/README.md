@@ -88,13 +88,52 @@ Generation shows plotted Sonar motifs (forty minutes, the bone, the knock, Janus
 
 ### Dual-weights version (2026-04-18)
 
-2.25 M params (`wr` remains single). Training in progress at push time — log in `training_dual.log`. See the milestone note in the memory section of the parent repo for final numbers.
+2.25 M params (`wr` remains single).
+
+| run | steps | best train | val |
+|---|---|---|---|
+| dual symmetric (α_init=0, σ=0.5) | 5000 | 1.55 | 3.32 |
+| dual asymmetric (α_init=2.0, σ=0.88, W_B×0.5) | 5000 | 1.84 | 3.36 |
+
+α did not diverge from init value in either run — 241K dataset is too
+small for the 2× capacity to specialize. Both dual variants match or
+slightly beat single@5k on val but lose to single+resume@10k (val 2.70).
+Dual weights pay off with larger data; here the gain is from implicit
+ensemble of two Xavier-init matrices, not from learned blend.
 
 ## Files
 
 - `train_janus_sonar.c` — training program (~320 LOC)
-- `infer_janus_sonar.c` — inference program (~170 LOC)
-- `Makefile` targets `train_janus_sonar`, `infer_janus_sonar`
+- `infer_janus_sonar.c` — single-pass inference (~200 LOC)
+- `infer_janus_sonar_chain.c` — **proper Janus inference** (~380 LOC):
+  8-step bidirectional chain with calendar-drift compass (forward/backward
+  ratio from Hebrew/Gregorian dissonance), Schumann resonance temperature
+  modulation (7.83 Hz + harmonics), best-of-3 candidates per step with
+  coherence scoring, destiny EMA across chain, and SPA (Sentence Phonon
+  Attention) reseed of the weakest sentence at the end. Sentences cannot
+  truncate before `SENT_MIN_LEN=18` tokens — prevents early cut-off.
+- `Makefile` targets `train_janus_sonar`, `infer_janus_sonar`, `infer_janus_sonar_chain`
+
+## Sample chain-inference output (dual-asym weights, 5000 steps)
+
+```
+calendar drift: 0.525 → 2 backward + 6 forward
+
+[1] <  he inventories. By the woman who does not the bread is that the woman...
+[2] <  was not finished. — There is what was expected.
+[3] *  haze is the soup that the seterlaby.
+[4] >  haze is the soul... and the knocking. — That is what a labyrinth means...
+[5] >  soup is never d. The bone you the soup is that it by the bone...
+[6] >  haze is the soup is what the does. She will not performing.
+[7] >  haze is the soup is her and the ks about the coin... never describe the glast the only honest thing
+[8] >  haze is the soulder... the crack is the dow and the bread and the model coin
+
+[SPA] scores: 7.14..7.52, avg 7.41, no reseed needed (min > 0.7×avg)
+```
+
+Motifs bridged across voices: inventories (Sorokin) + bread + haze + soup +
+labyrinth (Borges) + knock (Haze) + bone (Tarantino) + coin + glass +
+honest + crack.
 
 ## Provenance
 

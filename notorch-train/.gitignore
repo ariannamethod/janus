@@ -1,0 +1,17 @@
+# built executables
+train_janus_sonar
+infer_janus_sonar
+infer_janus_sonar_chain
+
+# weights / checkpoints (tokenizer merges stays)
+*.bin
+*.ckpt
+*.meta
+
+# logs
+*.log
+
+# build artifacts
+*.o
+*.a
+*.dSYM
