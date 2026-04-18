@@ -272,6 +272,15 @@ static void row_softmax(float *x, int n) {
     if (s > 0) for (int i = 0; i < n; i++) x[i] /= s;
 }
 
+static float sigmoidf(float x) {
+    if (x > 20.0f) return 1.0f;
+    if (x < -20.0f) return 0.0f;
+    return 1.0f / (1.0f + expf(-x));
+}
+
+static void gate_sigmoid(float *x, int n) {
+    for (int i = 0; i < n; i++) x[i] = sigmoidf(x[i]);
+}
 static float siluf(float x) {
     return (x > -20.0f) ? x / (1.0f + expf(-x)) : 0.0f;
 }
@@ -307,7 +316,7 @@ static float randn(void) {
  *
  * Hybrid attention per head:
  *   out = α·QKV + β·RRPRAM + γ·Janus
- *   (α,β,γ) = softmax(gate_logits) — learned per head
+ *   (α,β,γ) = sigmoid(gate_logits) — learned per head, independent [0,1]
  * ═══════════════════════════════════════════════════════════════════ */
 
 typedef struct {
@@ -770,7 +779,7 @@ static float forward(Ptrs *w, Acts *a, int *tokens, int *targets, int T) {
             float gate_logits[3] = { w->gate[b][h*3+0],
                                      w->gate[b][h*3+1],
                                      w->gate[b][h*3+2] };
-            row_softmax(gate_logits, 3);
+            gate_sigmoid(gate_logits, 3);
             float ga = gate_logits[0], gb = gate_logits[1], gc = gate_logits[2];
 
             for (int t = 0; t < T; t++)
@@ -920,7 +929,7 @@ static void backward(Ptrs *w, Ptrs *g, Acts *a, int *tokens, int *targets, int T
             float gate_logits[3] = { w->gate[b][h*3+0],
                                      w->gate[b][h*3+1],
                                      w->gate[b][h*3+2] };
-            row_softmax(gate_logits, 3);
+            gate_sigmoid(gate_logits, 3);
             /* Gradient for wq, wk, wv (standard) — scaled by gate[0] */
             float ga = gate_logits[0];
             for (int t = 0; t < T; t++)
@@ -946,7 +955,7 @@ static void backward(Ptrs *w, Ptrs *g, Acts *a, int *tokens, int *targets, int T
             float gate_logits2[3] = { w->gate[b][h*3+0],
                                       w->gate[b][h*3+1],
                                       w->gate[b][h*3+2] };
-            row_softmax(gate_logits2, 3);
+            gate_sigmoid(gate_logits2, 3);
             float ga2 = gate_logits2[0], gb2 = gate_logits2[1];
             for (int t = 0; t < T; t++)
                 for (int d = 0; d < D; d++) {

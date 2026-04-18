@@ -65,6 +65,15 @@ static void softmax(float *x, int n) {
     for (int i = 0; i < n; i++) x[i] /= s;
 }
 
+static float sigmoidf(float x) {
+    if (x > 20.0f) return 1.0f;
+    if (x < -20.0f) return 0.0f;
+    return 1.0f / (1.0f + expf(-x));
+}
+
+static void gate_sigmoid(float *x, int n) {
+    for (int i = 0; i < n; i++) x[i] = sigmoidf(x[i]);
+}
 static float siluf(float x) { return x > -20 ? x/(1+expf(-x)) : 0; }
 
 /* Weight layout — named_parameters() order from train_all.py Model("janus"):
@@ -188,7 +197,7 @@ static void forward(W *w, int *tok, int T, float *logits) {
             gs[h][0] = w->b[bl].gate[h*3+0];
             gs[h][1] = w->b[bl].gate[h*3+1];
             gs[h][2] = w->b[bl].gate[h*3+2];
-            softmax(gs[h], 3);
+            gate_sigmoid(gs[h], 3);
         }
 
         memset(cat, 0, T*E*4);

@@ -309,6 +309,8 @@ static void row_softmax(float*x,int n){
     float mx=x[0];for(int i=1;i<n;i++)if(x[i]>mx)mx=x[i];
     float s=0;for(int i=0;i<n;i++){x[i]=expf(x[i]-mx);s+=x[i];}
     if(s>0)for(int i=0;i<n;i++)x[i]/=s;}
+static float sigmoidf(float x){if(x>20.0f)return 1.0f;if(x<-20.0f)return 0.0f;return 1.0f/(1.0f+expf(-x));}
+static void gate_sigmoid(float*x,int n){for(int i=0;i<n;i++)x[i]=sigmoidf(x[i]);}
 static float siluf(float x){return x>-20?x/(1+expf(-x)):0;}
 static float siluf_grad(float x){if(x<-20)return 0;float s=1/(1+expf(-x));return s*(1+x*(1-s));}
 static void rmsnorm_fwd(float*o,const float*x,const float*g,int T,int E){
@@ -504,7 +506,7 @@ static float fwd(Ptrs*w,Acts*a,int*tok,int*tgt,Cfg*c){
                 float s=0;for(int j=0;j<=t;j++)s+=a->ja[t*T+j]*a->je[j*E+h*D+d];
                 a->jo[t*D+d]=s;}
             /* 3-way gate */
-            float gl[3]={w->gate[b][h*3],w->gate[b][h*3+1],w->gate[b][h*3+2]};row_softmax(gl,3);
+            float gl[3]={w->gate[b][h*3],w->gate[b][h*3+1],w->gate[b][h*3+2]};gate_sigmoid(gl,3);
             for(int t=0;t<T;t++) for(int d=0;d<D;d++)
                 a->cat[t*E+h*D+d]=gl[0]*a->ho[t*D+d]+gl[1]*a->ro[t*D+d]+gl[2]*a->jo[t*D+d];
         }
