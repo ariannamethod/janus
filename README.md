@@ -345,6 +345,38 @@ SentencePiece BPE 32K (EN/RU):
 
 ## Modules
 
+### `notorch-train/` — Training on verified C autograd
+
+An alternative training pipeline built on [notorch](https://github.com/ariannamethod/notorch) —
+pure-C PyTorch replacement with finite-difference-verified backward for
+every op. Hand-authored backward in `janus-bpe.c` stalled at train loss
+6.92 after 1000 steps on Sonar 241K. The same triple-attention architecture
+rebuilt from notorch primitives converged cleanly.
+
+```
+Architecture: T=128, E=128, H=4, D=32, B=4, M=256 (microjanus scale)
+Parameters:   1.57M (single) or 2.25M (dual weights)
+Attention:    MHA + RRPRAM + Janus Echo (equal 1/3 blend)
+Dual:         σ(α)·W_A + σ(−α)·W_B per linear (dual variant)
+Inference:    8-step bidirectional chain with calendar-drift compass,
+              Schumann temperature modulation, best-of-3 candidates,
+              SPA reseed, full AML physics (destiny + suffering + laws
+              + prophecy debt + Kuramoto chambers)
+```
+
+Trained weights live in [`weights/microjanus_*.bin`](weights/) — see
+[MICROJANUS.md](weights/MICROJANUS.md) for comparison. Best: `single_10k`
+with val 2.70, best train 1.22 after 10K steps on 8GB Mac.
+
+```bash
+cd notorch-train/
+make                                          # build trainer + 2 inferers
+./train_janus_sonar 5000 3e-4                 # train from scratch
+./train_janus_sonar --resume 5000 1.5e-4      # resume + fine-tune
+./infer_janus_sonar_chain                     # default: dual_sym weights
+./infer_janus_sonar_chain ../weights/microjanus_single_10k.bin "seed"
+```
+
 ### `janus.c` — Char-Level Hybrid Attention
 The foundational module. Char-level (VOCAB=256) with all three attention mechanisms in fluid hybrid. Full Calendar Drift, AML physics, Dario equation, Chuck optimizer, dual weight matrices, 12 bi-directional steps, Kuramoto chambers, MetaJanus birth snapshot, GGUF spore export.
 
