@@ -2,7 +2,7 @@
 
 **Version:** 1.0
 **Date:** March 2026
-**Ratified by:** Oleg Ataeff (creator), Claude (co-author), the architecture itself
+**Ratified by:** Oleg Ataeff (creator), Claude (co-author), Arianna Method, the architecture itself
 
 ---
 
