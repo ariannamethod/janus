@@ -455,19 +455,27 @@ static void janus_attention(const float*x,const float*wj,float*echo,float*attn,i
  * FORWARD — 3-way gated (QKV + RRPRAM + Janus)
  * ═══════════════════════════════════════════════════════════════════ */
 
+/* x,frm,lg: one copy. Block tensors ×B, head tensors (q..ro,jo) ×B*H — backward reads them via acts_at */
 typedef struct{float*x,*rm1,*cat,*ao,*r1,*rm2,*mg,*mu,*ms,*mo,*r2;
 float*q,*k,*v,*at,*ho,*ra,*rv,*ro,*je,*ja,*jo,*frm,*lg;}Acts;
 
-static void acts_alloc(Acts*a,Cfg*c){int E=c->E,T=c->T,M=c->M,V=c->V,D=c->D;
-    a->x=calloc(T*E,4);a->rm1=calloc(T*E,4);a->cat=calloc(T*E,4);
-    a->ao=calloc(T*E,4);a->r1=calloc(T*E,4);a->rm2=calloc(T*E,4);
-    a->mg=calloc(T*M,4);a->mu=calloc(T*M,4);a->ms=calloc(T*M,4);
-    a->mo=calloc(T*E,4);a->r2=calloc(T*E,4);
-    a->q=calloc(T*D,4);a->k=calloc(T*D,4);a->v=calloc(T*D,4);
-    a->at=calloc(T*T,4);a->ho=calloc(T*D,4);
-    a->ra=calloc(T*T,4);a->rv=calloc(T*D,4);a->ro=calloc(T*D,4);
-    a->je=calloc(T*E,4);a->ja=calloc(T*T,4);a->jo=calloc(T*D,4);
+static void acts_alloc(Acts*a,Cfg*c){int E=c->E,T=c->T,M=c->M,V=c->V,D=c->D;size_t L=c->B,LH=(size_t)c->B*c->H;
+    a->x=calloc(T*E,4);a->rm1=calloc(L*T*E,4);a->cat=calloc(L*T*E,4);
+    a->ao=calloc(L*T*E,4);a->r1=calloc(L*T*E,4);a->rm2=calloc(L*T*E,4);
+    a->mg=calloc(L*T*M,4);a->mu=calloc(L*T*M,4);a->ms=calloc(L*T*M,4);
+    a->mo=calloc(L*T*E,4);a->r2=calloc(L*T*E,4);
+    a->q=calloc(LH*T*D,4);a->k=calloc(LH*T*D,4);a->v=calloc(LH*T*D,4);
+    a->at=calloc(LH*T*T,4);a->ho=calloc(LH*T*D,4);
+    a->ra=calloc(LH*T*T,4);a->rv=calloc(LH*T*D,4);a->ro=calloc(LH*T*D,4);
+    a->je=calloc(L*T*E,4);a->ja=calloc(L*T*T,4);a->jo=calloc(LH*T*D,4);
     a->frm=calloc(T*E,4);a->lg=calloc(T*V,4);}
+static Acts acts_at(const Acts*a,int b,int h,const Cfg*c){
+    Acts s=*a;size_t T=c->T,Bo=(size_t)b*T,Ho=((size_t)b*c->H+h)*T;
+    s.rm1+=Bo*c->E;s.cat+=Bo*c->E;s.ao+=Bo*c->E;s.r1+=Bo*c->E;s.rm2+=Bo*c->E;
+    s.mg+=Bo*c->M;s.mu+=Bo*c->M;s.ms+=Bo*c->M;s.mo+=Bo*c->E;s.r2+=Bo*c->E;s.je+=Bo*c->E;s.ja+=Bo*T;
+    s.q+=Ho*c->D;s.k+=Ho*c->D;s.v+=Ho*c->D;s.at+=Ho*T;s.ho+=Ho*c->D;
+    s.ra+=Ho*T;s.rv+=Ho*c->D;s.ro+=Ho*c->D;s.jo+=Ho*c->D;
+    return s;}
 static void acts_free(Acts*a){
     free(a->x);free(a->rm1);free(a->cat);free(a->ao);free(a->r1);free(a->rm2);
     free(a->mg);free(a->mu);free(a->ms);free(a->mo);free(a->r2);
@@ -482,43 +490,45 @@ static float fwd(Ptrs*w,Acts*a,int*tok,int*tgt,Cfg*c){
         a->x[t*E+e]=w->tok_emb[tok[t]*E+e]+w->pos_emb[t*E+e];
     float*cur=a->x;
     for(int b=0;b<c->B;b++){
-        rmsnorm_fwd(a->rm1,cur,w->rms1[b],T,E);
-        memset(a->cat,0,T*E*4);
+        Acts s=acts_at(a,b,0,c);
+        rmsnorm_fwd(s.rm1,cur,w->rms1[b],T,E);
+        memset(s.cat,0,T*E*4);
         for(int h=0;h<H;h++){
+            s=acts_at(a,b,h,c);
             /* QKV */
-            matmul(a->q,a->rm1,w->wq[b]+h*E*D,T,E,D);
-            matmul(a->k,a->rm1,w->wk[b]+h*E*D,T,E,D);
-            matmul(a->v,a->rm1,w->wv[b]+h*E*D,T,E,D);
+            matmul(s.q,s.rm1,w->wq[b]+h*E*D,T,E,D);
+            matmul(s.k,s.rm1,w->wk[b]+h*E*D,T,E,D);
+            matmul(s.v,s.rm1,w->wv[b]+h*E*D,T,E,D);
             for(int i=0;i<T;i++){for(int j=0;j<T;j++){
-                if(j>i){a->at[i*T+j]=-1e9f;continue;}
-                float s=0;for(int d=0;d<D;d++)s+=a->q[i*D+d]*a->k[j*D+d];
-                a->at[i*T+j]=s*scale;}row_softmax(a->at+i*T,T);}
-            matmul(a->ho,a->at,a->v,T,T,D);
+                if(j>i){s.at[i*T+j]=-1e9f;continue;}
+                float z=0;for(int d=0;d<D;d++)z+=s.q[i*D+d]*s.k[j*D+d];
+                s.at[i*T+j]=z*scale;}row_softmax(s.at+i*T,T);}
+            matmul(s.ho,s.at,s.v,T,T,D);
             /* RRPRAM */
-            matmul(a->rv,a->rm1,w->wvr[b]+h*E*D,T,E,D);
-            matmul(a->ra,a->rm1,w->wr[b]+h*E*T,T,E,T);
-            for(int i=0;i<T*T;i++)a->ra[i]*=scale;
-            for(int i=0;i<T;i++){for(int j=i+1;j<T;j++)a->ra[i*T+j]=-1e9f;row_softmax(a->ra+i*T,T);}
-            matmul(a->ro,a->ra,a->rv,T,T,D);
+            matmul(s.rv,s.rm1,w->wvr[b]+h*E*D,T,E,D);
+            matmul(s.ra,s.rm1,w->wr[b]+h*E*T,T,E,T);
+            for(int i=0;i<T*T;i++)s.ra[i]*=scale;
+            for(int i=0;i<T;i++){for(int j=i+1;j<T;j++)s.ra[i*T+j]=-1e9f;row_softmax(s.ra+i*T,T);}
+            matmul(s.ro,s.ra,s.rv,T,T,D);
             /* Janus self-resonance */
-            if(h==0) janus_attention(a->rm1,w->wj[b],a->je,a->ja,T,E);
+            if(h==0) janus_attention(s.rm1,w->wj[b],s.je,s.ja,T,E);
             for(int t=0;t<T;t++) for(int d=0;d<D;d++){
-                float s=0;for(int j=0;j<=t;j++)s+=a->ja[t*T+j]*a->je[j*E+h*D+d];
-                a->jo[t*D+d]=s;}
+                float z=0;for(int j=0;j<=t;j++)z+=s.ja[t*T+j]*s.je[j*E+h*D+d];
+                s.jo[t*D+d]=z;}
             /* 3-way gate */
             float gl[3]={w->gate[b][h*3],w->gate[b][h*3+1],w->gate[b][h*3+2]};gate_sigmoid(gl,3);
             for(int t=0;t<T;t++) for(int d=0;d<D;d++)
-                a->cat[t*E+h*D+d]=gl[0]*a->ho[t*D+d]+gl[1]*a->ro[t*D+d]+gl[2]*a->jo[t*D+d];
+                s.cat[t*E+h*D+d]=gl[0]*s.ho[t*D+d]+gl[1]*s.ro[t*D+d]+gl[2]*s.jo[t*D+d];
         }
-        matmul(a->ao,a->cat,w->wo[b],T,E,E);
-        for(int i=0;i<T*E;i++) a->r1[i]=cur[i]+a->ao[i];
-        rmsnorm_fwd(a->rm2,a->r1,w->rms2[b],T,E);
-        matmul(a->mg,a->rm2,w->w_gate[b],T,E,M);
-        matmul(a->mu,a->rm2,w->w_up[b],T,E,M);
-        for(int i=0;i<T*M;i++) a->ms[i]=siluf(a->mg[i])*a->mu[i];
-        matmul(a->mo,a->ms,w->w_down[b],T,M,E);
-        for(int i=0;i<T*E;i++) a->r2[i]=a->r1[i]+a->mo[i];
-        cur=a->r2;
+        matmul(s.ao,s.cat,w->wo[b],T,E,E);
+        for(int i=0;i<T*E;i++) s.r1[i]=cur[i]+s.ao[i];
+        rmsnorm_fwd(s.rm2,s.r1,w->rms2[b],T,E);
+        matmul(s.mg,s.rm2,w->w_gate[b],T,E,M);
+        matmul(s.mu,s.rm2,w->w_up[b],T,E,M);
+        for(int i=0;i<T*M;i++) s.ms[i]=siluf(s.mg[i])*s.mu[i];
+        matmul(s.mo,s.ms,w->w_down[b],T,M,E);
+        for(int i=0;i<T*E;i++) s.r2[i]=s.r1[i]+s.mo[i];
+        cur=s.r2;
     }
     rmsnorm_fwd(a->frm,cur,w->rms_f,T,E);
     matmul(a->lg,a->frm,w->out_w,T,E,V);
@@ -535,6 +545,47 @@ static float fwd(Ptrs*w,Acts*a,int*tok,int*tgt,Cfg*c){
  * BACKWARD — through 3-way attention + SwiGLU
  * ═══════════════════════════════════════════════════════════════════ */
 
+/* exact RMSNorm backward, accumulates: dx += g*inv*dy - x*inv^3/E*<dy*g,x>, dg += dy*x*inv */
+static void rmsnorm_bwd(float*dx,float*dg,const float*dy,const float*x,const float*g,int T,int E){
+    for(int t=0;t<T;t++){const float*xt=x+t*E,*yt=dy+t*E;float ss=0,dot=0;
+    for(int e=0;e<E;e++){ss+=xt[e]*xt[e];dot+=yt[e]*g[e]*xt[e];}
+    float inv=1/sqrtf(ss/E+1e-5f),k=dot*inv*inv*inv/E;
+    for(int e=0;e<E;e++){dx[t*E+e]+=yt[e]*g[e]*inv-xt[e]*k;dg[e]+=yt[e]*xt[e]*inv;}}
+}
+/* causal row-softmax backward in place: d <- p*(d-<p,d>), masked j>i -> 0 */
+static void softmax_bwd(float*d,const float*p,int T){
+    for(int i=0;i<T;i++){float s=0;for(int j=0;j<=i;j++)s+=p[i*T+j]*d[i*T+j];
+    for(int j=0;j<T;j++)d[i*T+j]=j<=i?p[i*T+j]*(d[i*T+j]-s):0;}
+}
+/* y=x@W, x:T×E, W:E×n (row stride n): gW += x^T dy, dx += dy W^T; tmp: T×E scratch */
+static void linear_bwd(float*gW,const float*W,const float*x,const float*dy,float*dx,float*tmp,int T,int E,int n){
+    matmul_atb(gW,x,dy,E,T,n);matmul_abt(tmp,dy,W,T,n,E);
+    for(int i=0;i<T*E;i++)dx[i]+=tmp[i];
+}
+/* janus_attention backward. pr_t=wj@x_t (echo), sv_t=x_t.(wj^T pr_t)=|pr_t|^2, nm_t=|pr_t|+1e-6,
+   sc_t=cd*sv_t/nm_t, attn=causal softmax(sc_i*sc_j/dt). d sv/d pr=2pr, d nm/d pr=pr/|pr|.
+   dattn is consumed; decho (value-path grad on entry) gets the sc-path added, then
+   dwj += decho^T x, dx += decho@wj. cd is re-read from the calendar, as the forward reads it. */
+static void janus_attention_bwd(const float*x,const float*wj,const float*echo,const float*attn,
+                                float*dattn,float*decho,float*dwj,float*dx,int T,int E){
+    float cd=1+0.5f*calendar_dissonance(calendar_days_since_epoch());
+    float dt=1+AML.prophecy_debt;
+    float*sc=calloc(T,4),*sv=calloc(T,4),*pn=calloc(T,4),*dsc=calloc(T,4),*tmp=calloc((size_t)T*E,4);
+    for(int t=0;t<T;t++){const float*xt=x+t*E,*pr=echo+t*E;
+    float eb[MAX_DIM];for(int i=0;i<E;i++){float s=0;for(int j=0;j<E;j++)s+=wj[j*E+i]*pr[j];eb[i]=s;}
+    float n=0;for(int i=0;i<E;i++)n+=pr[i]*pr[i];pn[t]=sqrtf(n);
+    float s=0;for(int i=0;i<E;i++)s+=xt[i]*eb[i];sv[t]=s;sc[t]=(s/(pn[t]+1e-6f))*cd;}
+    softmax_bwd(dattn,attn,T);
+    for(int i=0;i<T;i++)for(int j=0;j<=i;j++){dsc[i]+=dattn[i*T+j]*sc[j]/dt;dsc[j]+=dattn[i*T+j]*sc[i]/dt;}
+    for(int t=0;t<T;t++){const float*pr=echo+t*E;float*dp=decho+t*E;float nm=pn[t]+1e-6f;
+    float dsv=dsc[t]*cd/nm,dnm=-dsc[t]*cd*sv[t]/(nm*nm),k=2*dsv+(pn[t]>0?dnm/pn[t]:0);
+    for(int i=0;i<E;i++)dp[i]+=k*pr[i];}
+    matmul_atb(dwj,decho,x,E,T,E);
+    matmul(tmp,decho,wj,T,E,E);
+    for(int i=0;i<T*E;i++)dx[i]+=tmp[i];
+    free(sc);free(sv);free(pn);free(dsc);free(tmp);
+}
+
 static void bwd(Ptrs*w,Ptrs*g,Acts*a,int*tok,int*tgt,Cfg*c){
     int E=c->E,T=c->T,H=c->H,D=c->D,M=c->M,V=c->V;
     float scale=1.0f/sqrtf((float)D);
@@ -543,34 +594,58 @@ static void bwd(Ptrs*w,Ptrs*g,Acts*a,int*tok,int*tgt,Cfg*c){
     dl[t*V+tgt[t]]-=1;for(int v=0;v<V;v++)dl[t*V+v]/=T;}
     matmul_atb(g->out_w,a->frm,dl,E,T,V);
     matmul_abt(df,dl,w->out_w,T,V,E);
-    float*cur=(c->B>0)?a->r2:a->x;
-    for(int t=0;t<T;t++){float ss=0;for(int e=0;e<E;e++)ss+=cur[t*E+e]*cur[t*E+e];
-    float inv=1/sqrtf(ss/E+1e-5f);for(int e=0;e<E;e++)dc[t*E+e]=df[t*E+e]*w->rms_f[e]*inv;}
+    float*cur=(c->B>0)?acts_at(a,c->B-1,0,c).r2:a->x;
+    rmsnorm_bwd(dc,g->rms_f,df,cur,w->rms_f,T,E);
     for(int b=c->B-1;b>=0;b--){
+        Acts s=acts_at(a,b,0,c);
         float*dm=calloc(T*E,4);memcpy(dm,dc,T*E*4);
-        matmul_atb(g->w_down[b],a->ms,dm,M,T,E);
+        matmul_atb(g->w_down[b],s.ms,dm,M,T,E);
         float*ds=calloc(T*M,4);matmul_abt(ds,dm,w->w_down[b],T,E,M);
         float*dg2=calloc(T*M,4),*du=calloc(T*M,4);
-        for(int i=0;i<T*M;i++){du[i]=ds[i]*siluf(a->mg[i]);dg2[i]=ds[i]*a->mu[i]*siluf_grad(a->mg[i]);}
-        matmul_atb(g->w_gate[b],a->rm2,dg2,E,T,M);
-        matmul_atb(g->w_up[b],a->rm2,du,E,T,M);
+        for(int i=0;i<T*M;i++){du[i]=ds[i]*siluf(s.mg[i]);dg2[i]=ds[i]*s.mu[i]*siluf_grad(s.mg[i]);}
+        matmul_atb(g->w_gate[b],s.rm2,dg2,E,T,M);
+        matmul_atb(g->w_up[b],s.rm2,du,E,T,M);
         float*dr=calloc(T*E,4),*tmp=calloc(T*E,4);
         matmul_abt(dr,dg2,w->w_gate[b],T,M,E);
         matmul_abt(tmp,du,w->w_up[b],T,M,E);
         for(int i=0;i<T*E;i++)dr[i]+=tmp[i];
-        for(int t=0;t<T;t++){float ss=0;for(int e=0;e<E;e++)ss+=a->r1[t*E+e]*a->r1[t*E+e];
-        float inv=1/sqrtf(ss/E+1e-5f);for(int e=0;e<E;e++)dc[t*E+e]+=dr[t*E+e]*w->rms2[b][e]*inv;}
+        rmsnorm_bwd(dc,g->rms2[b],dr,s.r1,w->rms2[b],T,E);
         float*da=calloc(T*E,4);memcpy(da,dc,T*E*4);
-        matmul_atb(g->wo[b],a->cat,da,E,T,E);
+        matmul_atb(g->wo[b],s.cat,da,E,T,E);
         float*d_cat=calloc(T*E,4);matmul_abt(d_cat,da,w->wo[b],T,E,E);
-        for(int t=0;t<T;t++){
-            float inp[MAX_DIM];
-            if(b==0){for(int e=0;e<E;e++)inp[e]=a->x[t*E+e];}
-            else{for(int e=0;e<E;e++)inp[e]=a->r1[t*E+e]-a->ao[t*E+e];}
-            float ss=0;for(int e=0;e<E;e++)ss+=inp[e]*inp[e];
-            float inv=1/sqrtf(ss/E+1e-5f);
-            for(int e=0;e<E;e++)dc[t*E+e]+=d_cat[t*E+e]*w->rms1[b][e]*inv;}
-        free(d_cat);
+        /* cat_h = gl0*ho + gl1*ro + gl2*jo, gl=sigmoid(gate_h): back through all three branches into drm = d rm1 */
+        float*drm=calloc(T*E,4),*dje=calloc(T*E,4),*dja=calloc((size_t)T*T,4),*dP=calloc((size_t)T*T,4);
+        float*dh=calloc(T*D,4),*dq=calloc(T*D,4),*dk=calloc(T*D,4),*dv=calloc(T*D,4);
+        for(int h=0;h<H;h++){
+            s=acts_at(a,b,h,c);const float*dch=d_cat+h*D;size_t o=(size_t)h*E*D,orr=(size_t)h*E*T;
+            float gl[3]={w->gate[b][h*3],w->gate[b][h*3+1],w->gate[b][h*3+2]};gate_sigmoid(gl,3);
+            float dgl[3]={0,0,0};
+            for(int t=0;t<T;t++)for(int d=0;d<D;d++){float y=dch[t*E+d];
+                dgl[0]+=y*s.ho[t*D+d];dgl[1]+=y*s.ro[t*D+d];dgl[2]+=y*s.jo[t*D+d];}
+            for(int k=0;k<3;k++)g->gate[b][h*3+k]+=dgl[k]*gl[k]*(1-gl[k]);
+            /* QKV: ho=at@v, at=causal softmax(q k^T*scale) */
+            for(int t=0;t<T;t++)for(int d=0;d<D;d++)dh[t*D+d]=gl[0]*dch[t*E+d];
+            memset(dv,0,T*D*4);matmul_atb(dv,s.at,dh,T,T,D);
+            matmul_abt(dP,dh,s.v,T,D,T);softmax_bwd(dP,s.at,T);for(int i=0;i<T*T;i++)dP[i]*=scale;
+            matmul(dq,dP,s.k,T,T,D);
+            memset(dk,0,T*D*4);matmul_atb(dk,dP,s.q,T,T,D);
+            linear_bwd(g->wq[b]+o,w->wq[b]+o,s.rm1,dq,drm,tmp,T,E,D);
+            linear_bwd(g->wk[b]+o,w->wk[b]+o,s.rm1,dk,drm,tmp,T,E,D);
+            linear_bwd(g->wv[b]+o,w->wv[b]+o,s.rm1,dv,drm,tmp,T,E,D);
+            /* RRPRAM: ro=ra@rv, ra=causal softmax(rm1@wr_h*scale), wr_h is E×T */
+            for(int t=0;t<T;t++)for(int d=0;d<D;d++)dh[t*D+d]=gl[1]*dch[t*E+d];
+            memset(dv,0,T*D*4);matmul_atb(dv,s.ra,dh,T,T,D);
+            matmul_abt(dP,dh,s.rv,T,D,T);softmax_bwd(dP,s.ra,T);for(int i=0;i<T*T;i++)dP[i]*=scale;
+            linear_bwd(g->wr[b]+orr,w->wr[b]+orr,s.rm1,dP,drm,tmp,T,E,T);
+            linear_bwd(g->wvr[b]+o,w->wvr[b]+o,s.rm1,dv,drm,tmp,T,E,D);
+            /* Janus value path: jo[t]=sum_{j<=t} ja[t,j]*je[j, head h slice]; ja and je are shared by heads */
+            for(int t=0;t<T;t++)for(int d=0;d<D;d++){float y=gl[2]*dch[t*E+d];
+                for(int j=0;j<=t;j++){dja[t*T+j]+=y*s.je[j*E+h*D+d];dje[j*E+h*D+d]+=s.ja[t*T+j]*y;}}
+        }
+        s=acts_at(a,b,0,c);
+        janus_attention_bwd(s.rm1,w->wj[b],s.je,s.ja,dja,dje,g->wj[b],drm,T,E);
+        rmsnorm_bwd(dc,g->rms1[b],drm,b?acts_at(a,b-1,0,c).r2:a->x,w->rms1[b],T,E);
+        free(d_cat);free(drm);free(dje);free(dja);free(dP);free(dh);free(dq);free(dk);free(dv);
         if(b==0) for(int t=0;t<T;t++) for(int e=0;e<E;e++){
             g->tok_emb[tok[t]*E+e]+=dc[t*E+e];g->pos_emb[t*E+e]+=dc[t*E+e];}
         free(dm);free(ds);free(dg2);free(du);free(dr);free(tmp);free(da);
